@@ -6,10 +6,10 @@ mod ports;
 mod pages;
 
 mod certs;
+mod detect;
+mod process;
 
 // Stub modules — will be implemented in subsequent tasks
-// mod detect;
-// mod process;
 // mod proxy;
 // mod daemon;
 // mod cli;
