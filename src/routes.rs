@@ -10,8 +10,11 @@ pub struct Route {
     pub hostname: String,
     pub port: u16,
     pub pid: u32,
+    #[serde(default)]
     pub owner_pid: u32,
+    #[serde(default)]
     pub cwd: String,
+    #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
 }
 
