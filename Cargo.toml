@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "Local dev proxy — named .localhost URLs instead of port numbers"
 license = "Apache-2.0"
+repository = "https://github.com/vercel/portless"
 
 [[bin]]
 name = "portless"

@@ -15,7 +15,16 @@ mod error;
 
 use error::Result;
 
-fn main() -> Result<()> {
-    println!("portless 1.0.0 (stub)");
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("PORTLESS_LOG")
+                .unwrap_or_else(|_| "portless=info".into()),
+        )
+        .init();
+
+    // Stub — will be replaced in Task 15
+    println!("portless 1.0.0");
     Ok(())
 }
