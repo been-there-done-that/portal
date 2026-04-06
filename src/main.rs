@@ -5,8 +5,9 @@ mod routes;
 mod ports;
 mod pages;
 
+mod certs;
+
 // Stub modules — will be implemented in subsequent tasks
-// mod certs;
 // mod detect;
 // mod process;
 // mod proxy;

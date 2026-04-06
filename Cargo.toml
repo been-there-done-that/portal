@@ -16,7 +16,7 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full", "client", "client-legacy", "server", "server-auto"] }
 http-body-util = "0.1"
 rustls = { version = "0.23", features = ["std", "ring"] }
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 clap = { version = "4", features = ["derive", "env"] }
