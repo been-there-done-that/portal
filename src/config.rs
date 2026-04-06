@@ -88,12 +88,12 @@ struct PartialProjectConfig {
 impl Config {
     /// Load configuration from default paths (used at runtime)
     pub fn load(cwd: &Path) -> Result<Self> {
-        let global_path = dirs::home_dir().map(|h| h.join(".portless/config.toml"));
+        let global_path = dirs::home_dir().map(|h| h.join(".portal/config.toml"));
         let project_path = find_project_toml(cwd);
 
         // Collect owned strings first, then borrow for the call
         let env_vars: Vec<(String, String)> = std::env::vars()
-            .filter(|(k, _)| k.starts_with("PORTLESS_"))
+            .filter(|(k, _)| k.starts_with("PORTAL_"))
             .collect();
         let env_refs: Vec<(&str, &str)> = env_vars
             .iter()
@@ -169,17 +169,17 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
 fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> Result<()> {
     for (key, value) in env_overrides {
         match *key {
-            "PORTLESS_TLD" => config.proxy.tld = value.to_string(),
-            "PORTLESS_HTTPS" => {
+            "PORTAL_TLD" => config.proxy.tld = value.to_string(),
+            "PORTAL_HTTPS" => {
                 config.proxy.https = matches!(
                     value.to_ascii_lowercase().as_str(),
                     "1" | "true" | "yes" | "on"
                 );
             }
-            "PORTLESS_HTTP_PORT" => {
+            "PORTAL_HTTP_PORT" => {
                 config.proxy.http_port = value.parse()?;
             }
-            "PORTLESS_HTTPS_PORT" => {
+            "PORTAL_HTTPS_PORT" => {
                 config.proxy.https_port = value.parse()?;
             }
             _ => {
@@ -190,11 +190,11 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
     Ok(())
 }
 
-/// Search upward from cwd for portless.toml
+/// Search upward from cwd for portal.toml
 pub fn find_project_toml(cwd: &Path) -> Option<PathBuf> {
     let mut current = cwd;
     loop {
-        let candidate = current.join("portless.toml");
+        let candidate = current.join("portal.toml");
         if candidate.exists() {
             return Some(candidate);
         }
@@ -202,11 +202,46 @@ pub fn find_project_toml(cwd: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Returns ~/.portless/
+/// Returns ~/.portal/ — or the invoking user's home when running under sudo.
+///
+/// When `sudo portless daemon` is used, sudo sets `SUDO_USER` to the original
+/// username. We resolve that user's home so the daemon socket and state live
+/// in the same place regardless of whether the process is root.
 pub fn dirs_for_state() -> PathBuf {
+    // If running under sudo, prefer the invoking user's home directory
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() && sudo_user != "root" {
+            // Use `getpwnam` on Unix to look up the user's home
+            #[cfg(unix)]
+            {
+                use std::ffi::CString;
+                if let Ok(c_name) = CString::new(sudo_user) {
+                    let pw = unsafe { nix::libc::getpwnam(c_name.as_ptr()) };
+                    if !pw.is_null() {
+                        let home_ptr = unsafe { (*pw).pw_dir };
+                        if !home_ptr.is_null() {
+                            let home = unsafe { std::ffi::CStr::from_ptr(home_ptr) };
+                            if let Ok(s) = home.to_str() {
+                                return PathBuf::from(s).join(".portal");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     dirs::home_dir()
-        .map(|h| h.join(".portless"))
-        .unwrap_or_else(|| PathBuf::from(".portless"))
+        .map(|h| h.join(".portal"))
+        .unwrap_or_else(|| PathBuf::from(".portal"))
+}
+
+/// Returns the UID/GID of the invoking user (before sudo elevation), if any.
+/// Used to chown state files so the real user can access them.
+#[cfg(unix)]
+pub fn sudo_uid_gid() -> Option<(u32, u32)> {
+    let uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
+    Some((uid, gid))
 }
 
 #[cfg(test)]
@@ -308,7 +343,7 @@ tld = "test"
         )
         .unwrap();
 
-        let env_overrides = [("PORTLESS_TLD", "myenv")];
+        let env_overrides = [("PORTAL_TLD", "myenv")];
         let config = Config::load_with_paths(Some(global_path), None, &env_overrides).unwrap();
 
         assert_eq!(config.proxy.tld, "myenv");
@@ -317,10 +352,10 @@ tld = "test"
     #[test]
     fn env_vars_parse_correctly() {
         let env_overrides = [
-            ("PORTLESS_TLD", "custom.local"),
-            ("PORTLESS_HTTPS", "0"),
-            ("PORTLESS_HTTP_PORT", "8080"),
-            ("PORTLESS_HTTPS_PORT", "8443"),
+            ("PORTAL_TLD", "custom.local"),
+            ("PORTAL_HTTPS", "0"),
+            ("PORTAL_HTTP_PORT", "8080"),
+            ("PORTAL_HTTPS_PORT", "8443"),
         ];
         let config = Config::load_with_paths(None, None, &env_overrides).unwrap();
 
@@ -333,7 +368,7 @@ tld = "test"
     #[test]
     fn find_project_toml_in_current_dir() {
         let temp = TempDir::new().unwrap();
-        let toml_path = temp.path().join("portless.toml");
+        let toml_path = temp.path().join("portal.toml");
         std::fs::write(&toml_path, "").unwrap();
 
         let found = find_project_toml(temp.path());
@@ -343,7 +378,7 @@ tld = "test"
     #[test]
     fn find_project_toml_upward() {
         let temp = TempDir::new().unwrap();
-        let toml_path = temp.path().join("portless.toml");
+        let toml_path = temp.path().join("portal.toml");
         std::fs::write(&toml_path, "").unwrap();
 
         // Create a subdirectory
@@ -364,7 +399,7 @@ tld = "test"
 
     #[test]
     fn invalid_port_env_var_returns_error() {
-        let env_overrides = [("PORTLESS_HTTP_PORT", "not_a_number")];
+        let env_overrides = [("PORTAL_HTTP_PORT", "not_a_number")];
         let result = Config::load_with_paths(None, None, &env_overrides);
         assert!(result.is_err(), "expected error for invalid port value");
     }

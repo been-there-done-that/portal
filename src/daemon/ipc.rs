@@ -29,7 +29,7 @@ impl IpcServer {
         let listener = match UnixListener::bind(&self.sock_path) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("portless: failed to bind IPC socket: {e}");
+                eprintln!("portal: failed to bind IPC socket: {e}");
                 return;
             }
         };
@@ -37,11 +37,26 @@ impl IpcServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            // When running under sudo, allow the invoking user to connect by
+            // setting 0o660 and chown-ing the socket to SUDO_UID:SUDO_GID.
+            let (mode, uid_gid) = match crate::config::sudo_uid_gid() {
+                Some(ug) => (0o660, Some(ug)),
+                None => (0o600, None),
+            };
             if let Err(e) = std::fs::set_permissions(
                 &self.sock_path,
-                std::fs::Permissions::from_mode(0o600),
+                std::fs::Permissions::from_mode(mode),
             ) {
-                eprintln!("portless: failed to set socket permissions: {e}");
+                eprintln!("portal: failed to set socket permissions: {e}");
+            }
+            if let Some((uid, gid)) = uid_gid {
+                unsafe {
+                    let path = std::ffi::CString::new(
+                        self.sock_path.to_string_lossy().as_bytes(),
+                    )
+                    .unwrap();
+                    nix::libc::chown(path.as_ptr(), uid, gid);
+                }
             }
         }
 
@@ -61,7 +76,7 @@ impl IpcServer {
                     });
                 }
                 Err(e) => {
-                    eprintln!("portless: IPC accept error: {e}");
+                    eprintln!("portal: IPC accept error: {e}");
                 }
             }
         }
@@ -168,6 +183,26 @@ async fn dispatch(
             }
         }
 
-        Command::Run { .. } => Response::err("use portless run from CLI"),
+        Command::RegisterRoute {
+            hostname,
+            port,
+            pid,
+            cwd,
+        } => {
+            let route = crate::routes::Route {
+                hostname: hostname.clone(),
+                port,
+                pid,
+                owner_pid: pid,
+                cwd,
+                created_at: chrono::Utc::now(),
+            };
+            match routes.insert(route) {
+                Ok(_) => Response::ok_empty(),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+
+        Command::Run { .. } => Response::err("use portal run from CLI"),
     }
 }

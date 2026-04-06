@@ -1,17 +1,17 @@
 [package]
-name = "portless"
+name = "portal"
 version = "1.0.0"
 edition = "2021"
 description = "Local dev proxy — named .localhost URLs instead of port numbers"
 license = "Apache-2.0"
-repository = "https://github.com/vercel/portless"
+repository = "https://github.com/been-there-done-that/portal"
 
 [lib]
-name = "portless"
+name = "portal"
 path = "src/lib.rs"
 
 [[bin]]
-name = "portless"
+name = "portal"
 path = "src/main.rs"
 
 [dependencies]

@@ -16,11 +16,14 @@ use error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the ring crypto provider for rustls (must happen before any TLS use)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli_args = cli::Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("PORTLESS_LOG")
-                .unwrap_or_else(|_| "portless=info".into()),
+            tracing_subscriber::EnvFilter::try_from_env("PORTAL_LOG")
+                .unwrap_or_else(|_| "portal=info".into()),
         )
         .init();
     cli::run(cli_args).await

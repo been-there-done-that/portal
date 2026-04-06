@@ -128,7 +128,7 @@ mod tests {
 
             let mut rng = rand::thread_rng();
             let random_id = rng.gen::<u32>();
-            let test_file = format!("/tmp/portless_port_test_{}.txt", random_id);
+            let test_file = format!("/tmp/portal_port_test_{}.txt", random_id);
 
             let args = vec![
                 "sh".to_string(),
@@ -161,7 +161,7 @@ mod tests {
 
             let mut rng = rand::thread_rng();
             let random_id = rng.gen::<u32>();
-            let test_file = format!("C:\\temp\\portless_port_test_{}.txt", random_id);
+            let test_file = format!("C:\\temp\\portal_port_test_{}.txt", random_id);
 
             let args = vec![
                 "cmd".to_string(),

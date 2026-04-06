@@ -214,7 +214,7 @@ fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
     use std::process::Command;
-    let dest = std::path::Path::new("/usr/local/share/ca-certificates/portless-ca.crt");
+    let dest = std::path::Path::new("/usr/local/share/ca-certificates/portal-ca.crt");
     std::fs::copy(ca_path, dest)?;
     let status = Command::new("update-ca-certificates").status()?;
     if !status.success() {

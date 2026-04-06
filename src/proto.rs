@@ -27,6 +27,13 @@ pub enum Command {
     CertInstall,
     /// Reset the TLS certificate
     CertReset,
+    /// Register a route in the daemon's in-memory store (called by CLI after spawning child)
+    RegisterRoute {
+        hostname: String,
+        port: u16,
+        pid: u32,
+        cwd: String,
+    },
 }
 
 /// Response sent from Daemon to CLI (IPC).

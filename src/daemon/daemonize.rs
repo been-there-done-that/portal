@@ -1,9 +1,16 @@
 use crate::error::Result;
 use std::path::Path;
 
-/// Write the current PID to a file.
+/// Write the current PID to a file, chown-ing to the invoking user if under sudo.
 pub fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
     std::fs::write(path, pid.to_string())?;
+    #[cfg(unix)]
+    if let Some((uid, gid)) = crate::config::sudo_uid_gid() {
+        unsafe {
+            let p = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+            nix::libc::chown(p.as_ptr(), uid, gid);
+        }
+    }
     Ok(())
 }
 

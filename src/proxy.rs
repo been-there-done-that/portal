@@ -8,7 +8,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-pub const HOP_HEADER: &str = "x-portless-hops";
+pub const HOP_HEADER: &str = "x-portal-hops";
 pub const MAX_HOPS: u8 = 5;
 
 pub type BoxBodyType = BoxBody<Bytes, hyper::Error>;

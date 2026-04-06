@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="vercel/portless"
+REPO="deesh/portal"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-BINARY="portless"
+BINARY="portal"
 
 detect_platform() {
   local os arch
@@ -36,20 +36,20 @@ main() {
   local platform version url archive
   platform="$(detect_platform)"
   version="${VERSION:-$(latest_version)}"
-  archive="portless-${version}-${platform}.tar.gz"
+  archive="portal-${version}-${platform}.tar.gz"
   url="https://github.com/${REPO}/releases/download/${version}/${archive}"
 
-  echo "Installing portless ${version} for ${platform}..."
+  echo "Installing portal ${version} for ${platform}..."
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
 
   curl -fsSL "$url" -o "$tmp/$archive"
   tar -xzf "$tmp/$archive" -C "$tmp"
-  install -m 755 "$tmp/portless" "$INSTALL_DIR/$BINARY"
+  install -m 755 "$tmp/portal" "$INSTALL_DIR/$BINARY"
 
-  echo "portless installed to $INSTALL_DIR/$BINARY"
-  echo "Run: portless --help"
+  echo "portal installed to $INSTALL_DIR/$BINARY"
+  echo "Run: portal --help"
 }
 
 main "$@"

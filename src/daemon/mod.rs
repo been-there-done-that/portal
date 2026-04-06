@@ -10,12 +10,12 @@ use crate::routes::RouteStore;
 /// Entry point called by `portless daemon`.
 ///
 /// Uses the re-spawn approach to avoid fork-in-async-runtime problems:
-/// - If PORTLESS_IS_DAEMON=1 is set, we are already in the daemon process:
+/// - If PORTAL_IS_DAEMON=1 is set, we are already in the daemon process:
 ///   run the daemon loop directly.
-/// - Otherwise, spawn a fresh copy of the binary with PORTLESS_IS_DAEMON=1,
+/// - Otherwise, spawn a fresh copy of the binary with PORTAL_IS_DAEMON=1,
 ///   then exit.
 pub async fn start() -> Result<()> {
-    if std::env::var("PORTLESS_IS_DAEMON").as_deref() == Ok("1") {
+    if std::env::var("PORTAL_IS_DAEMON").as_deref() == Ok("1") {
         run_daemon_loop().await
     } else {
         let state_dir = dirs_for_state();
@@ -23,19 +23,25 @@ pub async fn start() -> Result<()> {
         let pid_path = state_dir.join("daemon.pid");
 
         if daemonize::daemon_already_running(&pid_path) {
-            eprintln!("portless daemon already running");
+            eprintln!("portal daemon already running");
             return Ok(());
         }
 
-        // Spawn a detached copy of ourselves as the real daemon
+        // Spawn a detached copy of ourselves as the real daemon.
+        // Forward SUDO_* vars so the child can chown state files correctly.
         let exe = std::env::current_exe()?;
-        tokio::process::Command::new(exe)
-            .arg("daemon")
-            .env("PORTLESS_IS_DAEMON", "1")
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.arg("daemon")
+            .env("PORTAL_IS_DAEMON", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+            .stderr(std::process::Stdio::null());
+        for var in &["SUDO_USER", "SUDO_UID", "SUDO_GID"] {
+            if let Ok(val) = std::env::var(var) {
+                cmd.env(var, val);
+            }
+        }
+        cmd.spawn()?;
 
         Ok(())
     }
@@ -44,10 +50,26 @@ pub async fn start() -> Result<()> {
 async fn run_daemon_loop() -> Result<()> {
     let state_dir = dirs_for_state();
     std::fs::create_dir_all(&state_dir)?;
+    std::fs::create_dir_all(state_dir.join("logs"))?;
+
+    // Chown the state directory to the invoking user when running under sudo,
+    // so CLI commands (run as the real user) can also write to it.
+    #[cfg(unix)]
+    if let Some((uid, gid)) = crate::config::sudo_uid_gid() {
+        for path in [
+            state_dir.as_path(),
+            &state_dir.join("logs"),
+            &state_dir.join("certs"),
+        ] {
+            unsafe {
+                let p = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+                nix::libc::chown(p.as_ptr(), uid, gid);
+            }
+        }
+    }
 
     let pid_path = state_dir.join("daemon.pid");
     let log_path = state_dir.join("logs").join("daemon.log");
-    std::fs::create_dir_all(state_dir.join("logs"))?;
 
     // Redirect our own stdio to the log file (best-effort)
     redirect_stdio(&log_path);
@@ -62,7 +84,7 @@ async fn run_daemon_loop() -> Result<()> {
     let routes = match RouteStore::new(state_dir.join("routes.json")) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("portless: failed to load route store: {e}");
+            eprintln!("portal: failed to load route store: {e}");
             return Err(e);
         }
     };
@@ -79,7 +101,7 @@ async fn run_daemon_loop() -> Result<()> {
     let https_listener = tokio::net::TcpListener::bind(&https_bind).await?;
 
     tracing::info!(
-        "portless daemon started (pid={}, http={}, https={})",
+        "portal daemon started (pid={}, http={}, https={})",
         std::process::id(),
         config.proxy.http_port,
         config.proxy.https_port
@@ -97,7 +119,7 @@ async fn run_daemon_loop() -> Result<()> {
     }
 
     // Start IPC server (blocks)
-    let sock_path = state_dir.join("portless.sock");
+    let sock_path = state_dir.join("portal.sock");
     let ipc = ipc::IpcServer::new(sock_path, pid_path, routes.clone());
     ipc.serve().await;
 

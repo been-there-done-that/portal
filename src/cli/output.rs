@@ -54,7 +54,7 @@ pub fn print_status(resp: &Response) {
         let uptime = data["uptime_secs"].as_u64().unwrap_or(0);
         let routes = data["routes_count"].as_u64().unwrap_or(0);
 
-        println!("portless v{version}");
+        println!("portal v{version}");
         println!("  pid:     {pid}");
         println!("  uptime:  {uptime}s");
         println!("  routes:  {routes}");

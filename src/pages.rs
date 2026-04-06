@@ -63,7 +63,7 @@ pub fn page_404(hostname: &str) -> String {
         <h1>404</h1>
         <p>Hostname not found</p>
         <p class="hostname">{}</p>
-        <p>The requested hostname is not registered with portless.</p>
+        <p>The requested hostname is not registered with portal.</p>
     </div>
 </body>
 </html>"#,

@@ -7,9 +7,9 @@ use crate::proto::{read_frame, write_frame, Command};
 
 #[derive(Parser)]
 #[command(
-    name = "portless",
+    name = "portal",
     version,
-    about = "Named .localhost URLs for local dev"
+    about = "Named .localhost URLs for local development"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -26,6 +26,9 @@ pub enum CliCommand {
         hostname: Option<String>,
         #[arg(long)]
         port: Option<u16>,
+        /// Kill any existing instance for this hostname before starting
+        #[arg(long)]
+        force: bool,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -140,68 +143,80 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Run {
             hostname,
             port,
+            force,
             args,
         } => {
+            // Allow --force anywhere in the arg list (clap trailing_var_arg swallows flags
+            // that appear after the first positional argument).
+            let force = force || args.iter().any(|a| a == "--force");
+            let args: Vec<String> = args.into_iter().filter(|a| a != "--force").collect();
+
             ensure_daemon_running().await?;
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let hostname =
                 crate::detect::resolve_hostname(&cwd, hostname.as_deref(), &config.proxy.tld);
+
+            // Check for an existing live route for this hostname
+            {
+                let mut stream = ipc_connect().await?;
+                write_frame(&mut stream, &Command::Ls).await?;
+                let resp: crate::proto::Response = read_frame(&mut stream).await?;
+                if let Some(serde_json::Value::Array(routes)) = resp.data {
+                    if let Some(existing) = routes.iter().find(|r| {
+                        r["hostname"].as_str() == Some(&hostname)
+                    }) {
+                        if force {
+                            // Kill the existing instance via Stop
+                            let mut s = ipc_connect().await?;
+                            write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+                            let _: crate::proto::Response = read_frame(&mut s).await?;
+                            eprintln!("  stopped existing instance on port {}", existing["port"].as_u64().unwrap_or(0));
+                        } else {
+                            eprintln!(
+                                "error: {hostname} is already running on port {} (use --force to replace it)",
+                                existing["port"].as_u64().unwrap_or(0)
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+
             let port = port.map(Ok).unwrap_or_else(|| {
                 crate::ports::find_free_port(config.proxy.port_range.0, config.proxy.port_range.1)
             })?;
 
-            // Register the route with the daemon via IPC
             let my_pid = std::process::id();
-            {
-                let mut stream = ipc_connect().await?;
-                write_frame(
-                    &mut stream,
-                    &Command::Run {
-                        hostname: hostname.clone(),
-                        args: args.clone(),
-                        cwd: cwd.to_string_lossy().to_string(),
-                    },
-                )
-                .await?;
-                // The daemon will respond with an error ("use portless run from CLI")
-                // which we intentionally ignore here — spawn is our responsibility.
-                let _: crate::proto::Response = read_frame(&mut stream)
-                    .await
-                    .unwrap_or(crate::proto::Response::ok_empty());
-            }
-
             let mut child = crate::process::spawn_child(&cwd, &args, port).await?;
 
-            println!("  https://{hostname}  ->  port {port}");
+            eprintln!("  https://{hostname}  ->  port {port}");
 
-            // Register the route with the running PID
+            // Register the route in the daemon's live in-memory store via IPC
             {
                 let child_pid = child.id().unwrap_or(my_pid);
-                let route = crate::routes::Route {
-                    hostname: hostname.clone(),
-                    port,
-                    pid: child_pid,
-                    owner_pid: my_pid,
-                    cwd: cwd.to_string_lossy().to_string(),
-                    created_at: chrono::Utc::now(),
-                };
-                // Persist directly to the route store path so the daemon can pick it up
-                let state_dir = crate::config::dirs_for_state();
-                if let Ok(store) = crate::routes::RouteStore::new(state_dir.join("routes.json")) {
-                    let _ = store.insert(route);
+                if let Ok(mut stream) = ipc_connect().await {
+                    let _ = write_frame(
+                        &mut stream,
+                        &Command::RegisterRoute {
+                            hostname: hostname.clone(),
+                            port,
+                            pid: child_pid,
+                            cwd: cwd.to_string_lossy().to_string(),
+                        },
+                    )
+                    .await;
+                    let _: crate::proto::Response = read_frame(&mut stream)
+                        .await
+                        .unwrap_or(crate::proto::Response::ok_empty());
                 }
             }
 
             child.wait().await?;
 
-            // Clean up route on exit
-            {
-                let state_dir = crate::config::dirs_for_state();
-                if let Ok(store) = crate::routes::RouteStore::new(state_dir.join("routes.json")) {
-                    let _ = store.remove(&hostname);
-                }
-            }
+            // Don't send Rm here — if --force replaced us, our Rm would wipe the
+            // new route. Instead, rely on remove_stale() (called by `portless ls`)
+            // to clean up dead routes automatically.
         }
     }
 
@@ -209,14 +224,14 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn ipc_connect() -> Result<tokio::net::UnixStream> {
-    let sock = crate::config::dirs_for_state().join("portless.sock");
+    let sock = crate::config::dirs_for_state().join("portal.sock");
     tokio::net::UnixStream::connect(&sock)
         .await
         .map_err(|_| crate::error::Error::DaemonNotRunning)
 }
 
 async fn ensure_daemon_running() -> Result<()> {
-    let sock = crate::config::dirs_for_state().join("portless.sock");
+    let sock = crate::config::dirs_for_state().join("portal.sock");
     if sock.exists() && tokio::net::UnixStream::connect(&sock).await.is_ok() {
         return Ok(());
     }
@@ -224,7 +239,7 @@ async fn ensure_daemon_running() -> Result<()> {
     let exe = std::env::current_exe()?;
     tokio::process::Command::new(exe)
         .arg("daemon")
-        .env("PORTLESS_IS_DAEMON", "1")
+        .env("PORTAL_IS_DAEMON", "1")
         .spawn()?;
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

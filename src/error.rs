@@ -20,7 +20,7 @@ pub enum Error {
     #[error("Certificate error: {0}")]
     Cert(String),
 
-    #[error("Daemon not running — start with `portless daemon`")]
+    #[error("Daemon not running — start with `portal daemon`")]
     DaemonNotRunning,
 
     #[error("Port range exhausted (no free port in {0}–{1})")]
