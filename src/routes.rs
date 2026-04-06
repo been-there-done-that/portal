@@ -110,12 +110,19 @@ impl RouteStore {
 pub fn pid_alive_check(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        use std::process::Command;
-
-        // Use `kill -0` to check if process exists without sending a signal
-        let output = Command::new("kill").arg("-0").arg(pid.to_string()).output();
-
-        matches!(output, Ok(output) if output.status.success())
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        // Reject PIDs that would overflow i32 (e.g. u32::MAX wraps to -1,
+        // which has special kill(2) semantics and does not represent a real PID).
+        let raw = match i32::try_from(pid) {
+            Ok(v) if v > 0 => v,
+            _ => return false,
+        };
+        match kill(Pid::from_raw(raw), None) {
+            Ok(_) => true,                              // process exists and we can signal it
+            Err(nix::errno::Errno::EPERM) => true,      // exists but owned by another user
+            Err(_) => false,                            // ESRCH = no such process, or other error
+        }
     }
 
     #[cfg(windows)]

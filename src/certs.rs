@@ -60,6 +60,11 @@ impl CertStore {
 
         std::fs::write(&ca_pem_path, cert.pem())?;
         std::fs::write(&ca_key_path, key_pair.serialize_pem())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ca_key_path, std::fs::Permissions::from_mode(0o600))?;
+        }
 
         tracing::info!(
             "Generated local CA certificate at {}",
@@ -112,7 +117,7 @@ impl CertStore {
         let mut host_params = CertificateParams::new(vec![hostname.to_string()])
             .map_err(|e| Error::Cert(format!("failed to build host params: {e}")))?;
         host_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        host_params.not_after = rcgen::date_time_ymd(2026, 1, 1);
+        host_params.not_after = rcgen::date_time_ymd(2034, 1, 1);
         host_params
             .distinguished_name
             .push(DnType::CommonName, hostname);
@@ -123,6 +128,11 @@ impl CertStore {
 
         std::fs::write(&cert_path, host_cert.pem())?;
         std::fs::write(&key_path, host_key.serialize_pem())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+        }
 
         let ck = Arc::new(load_certified_key(&cert_path, &key_path)?);
         self.cache.insert(hostname.to_string(), Arc::clone(&ck));

@@ -76,7 +76,8 @@ where
     T: Serialize,
 {
     let json = serde_json::to_string(value)?;
-    let len = json.len() as u32;
+    let len = u32::try_from(json.len())
+        .map_err(|_| Error::Ipc("frame payload too large".to_string()))?;
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&len.to_be_bytes());
 
@@ -94,7 +95,11 @@ where
 {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
+    const MAX_FRAME_LEN: usize = 1 * 1024 * 1024; // 1 MiB
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(Error::Ipc(format!("frame too large: {len} bytes (max {MAX_FRAME_LEN})")));
+    }
 
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;

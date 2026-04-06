@@ -222,7 +222,10 @@ async fn ensure_daemon_running() -> Result<()> {
     }
     // Auto-start daemon
     let exe = std::env::current_exe()?;
-    tokio::process::Command::new(exe).arg("daemon").spawn()?;
+    tokio::process::Command::new(exe)
+        .arg("daemon")
+        .env("PORTLESS_IS_DAEMON", "1")
+        .spawn()?;
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {

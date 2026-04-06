@@ -98,7 +98,7 @@ async fn run_daemon_loop() -> Result<()> {
 
     // Start IPC server (blocks)
     let sock_path = state_dir.join("portless.sock");
-    let ipc = ipc::IpcServer::new(sock_path, routes.clone());
+    let ipc = ipc::IpcServer::new(sock_path, pid_path, routes.clone());
     ipc.serve().await;
 
     Ok(())

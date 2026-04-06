@@ -6,16 +6,18 @@ use crate::routes::RouteStore;
 
 pub struct IpcServer {
     sock_path: PathBuf,
+    pid_path: PathBuf,
     routes: RouteStore,
     start_time: std::time::Instant,
 }
 
 impl IpcServer {
-    pub fn new(sock_path: PathBuf, routes: RouteStore) -> Self {
+    pub fn new(sock_path: PathBuf, pid_path: PathBuf, routes: RouteStore) -> Self {
         // Remove stale socket file if it exists
         std::fs::remove_file(&sock_path).ok();
         IpcServer {
             sock_path,
+            pid_path,
             routes,
             start_time: std::time::Instant::now(),
         }
@@ -32,15 +34,30 @@ impl IpcServer {
             }
         };
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(
+                &self.sock_path,
+                std::fs::Permissions::from_mode(0o600),
+            ) {
+                eprintln!("portless: failed to set socket permissions: {e}");
+            }
+        }
+
         let routes = self.routes.clone();
         let start_time = self.start_time;
+        let sock_path = self.sock_path.clone();
+        let pid_path = self.pid_path.clone();
 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let routes = routes.clone();
+                    let sock = sock_path.clone();
+                    let pid = pid_path.clone();
                     tokio::spawn(async move {
-                        handle_connection(stream, routes, start_time).await;
+                        handle_connection(stream, routes, start_time, sock, pid).await;
                     });
                 }
                 Err(e) => {
@@ -55,18 +72,26 @@ async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     routes: RouteStore,
     start_time: std::time::Instant,
+    sock_path: PathBuf,
+    pid_path: PathBuf,
 ) {
     let cmd: Command = match read_frame(&mut stream).await {
         Ok(c) => c,
         Err(_) => return,
     };
 
-    let response = dispatch(cmd, routes, start_time).await;
+    let response = dispatch(cmd, routes, start_time, sock_path, pid_path).await;
 
     write_frame(&mut stream, &response).await.ok();
 }
 
-async fn dispatch(cmd: Command, routes: RouteStore, start_time: std::time::Instant) -> Response {
+async fn dispatch(
+    cmd: Command,
+    routes: RouteStore,
+    start_time: std::time::Instant,
+    sock_path: PathBuf,
+    pid_path: PathBuf,
+) -> Response {
     match cmd {
         Command::Ls => {
             let _ = routes.remove_stale();
@@ -110,9 +135,12 @@ async fn dispatch(cmd: Command, routes: RouteStore, start_time: std::time::Insta
         }
 
         Command::Shutdown => {
-            // Respond first, then exit
-            tokio::spawn(async {
+            let sock = sock_path.clone();
+            let pid = pid_path.clone();
+            tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = std::fs::remove_file(&sock);
+                let _ = std::fs::remove_file(&pid);
                 std::process::exit(0);
             });
             Response::ok_empty()
