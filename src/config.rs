@@ -107,20 +107,12 @@ impl Config {
         let global_path = dirs::home_dir().map(|h| h.join(".portless/config.toml"));
         let project_path = find_project_toml(cwd);
 
-        // Collect env vars that matter - need to leak them for the static lifetime
-        let leaked_vars: Vec<(&'static str, &'static str)> = std::env::vars()
-            .filter_map(|(k, v)| {
-                if k.starts_with("PORTLESS_") {
-                    let k_static: &'static str = Box::leak(k.into_boxed_str());
-                    let v_static: &'static str = Box::leak(v.into_boxed_str());
-                    Some((k_static, v_static))
-                } else {
-                    None
-                }
-            })
+        // Collect owned strings first, then borrow for the call
+        let env_vars: Vec<(String, String)> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("PORTLESS_"))
             .collect();
-
-        Self::load_with_paths(global_path, project_path, &leaked_vars)
+        let env_refs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        Self::load_with_paths(global_path, project_path, &env_refs)
     }
 
     /// Load configuration with explicit paths (used in tests)
@@ -181,8 +173,8 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
         config.daemon.auto_start = auto_start;
     }
 
-    if let Some(name) = partial.project.name {
-        config.project.name = Some(name);
+    if partial.project.name.is_some() {
+        config.project.name = partial.project.name;
     }
 }
 
@@ -192,7 +184,7 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
         match *key {
             "PORTLESS_TLD" => config.proxy.tld = value.to_string(),
             "PORTLESS_HTTPS" => {
-                config.proxy.https = *value == "1" || *value == "true";
+                config.proxy.https = matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
             }
             "PORTLESS_HTTP_PORT" => {
                 config.proxy.http_port = value.parse()?;
@@ -210,17 +202,13 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
 
 /// Search upward from cwd for portless.toml
 pub fn find_project_toml(cwd: &Path) -> Option<PathBuf> {
-    let mut current = cwd.to_path_buf();
+    let mut current = cwd;
     loop {
-        let toml_path = current.join("portless.toml");
-        if toml_path.exists() {
-            return Some(toml_path);
+        let candidate = current.join("portless.toml");
+        if candidate.exists() {
+            return Some(candidate);
         }
-
-        if !current.pop() {
-            // Reached root
-            return None;
-        }
+        current = current.parent()?;
     }
 }
 
@@ -382,5 +370,12 @@ tld = "test"
         let temp = TempDir::new().unwrap();
         let found = find_project_toml(temp.path());
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn invalid_port_env_var_returns_error() {
+        let env_overrides = [("PORTLESS_HTTP_PORT", "not_a_number")];
+        let result = Config::load_with_paths(None, None, &env_overrides);
+        assert!(result.is_err(), "expected error for invalid port value");
     }
 }
