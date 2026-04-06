@@ -1,11 +1,11 @@
 mod error;
 mod proto;
 mod config;
+mod routes;
+mod ports;
+mod pages;
 
 // Stub modules — will be implemented in subsequent tasks
-// mod routes;
-// mod ports;
-// mod pages;
 // mod certs;
 // mod detect;
 // mod process;
