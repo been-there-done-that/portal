@@ -2,7 +2,7 @@ pub mod daemonize;
 pub mod ipc;
 
 use crate::certs::CertStore;
-use crate::config::{Config, dirs_for_state};
+use crate::config::{dirs_for_state, Config};
 use crate::error::Result;
 use crate::proxy::serve_http_redirect;
 use crate::routes::RouteStore;
@@ -127,16 +127,12 @@ fn redirect_stdio(log_path: &std::path::Path) {
     let _ = log_path;
 }
 
-async fn serve_https(
-    listener: tokio::net::TcpListener,
-    cert_store: CertStore,
-    routes: RouteStore,
-) {
+async fn serve_https(listener: tokio::net::TcpListener, cert_store: CertStore, routes: RouteStore) {
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioIo;
     use rustls::ServerConfig;
     use std::sync::Arc;
     use tokio_rustls::TlsAcceptor;
-    use hyper::server::conn::http1;
-    use hyper_util::rt::TokioIo;
 
     let resolver = Arc::new(crate::certs::PortlessCertResolver::new(cert_store));
     let tls_config = Arc::new(

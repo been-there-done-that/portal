@@ -1,7 +1,6 @@
-use serde_json::json;
+use crate::error::Result;
 use std::fs;
 use std::path::Path;
-use crate::error::Result;
 
 /// Strip known package runner prefixes from argv slice.
 pub fn strip_runner_prefix<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
@@ -87,7 +86,8 @@ pub fn resolve_hostname(cwd: &Path, override_name: Option<&str>, tld: &str) -> S
             // Read the .git file to get the gitdir path
             if let Ok(contents) = fs::read_to_string(&git_path) {
                 // Parse "gitdir: /path/to/.git/worktrees/<name>"
-                if let Some(gitdir_line) = contents.lines().find(|line| line.starts_with("gitdir:")) {
+                if let Some(gitdir_line) = contents.lines().find(|line| line.starts_with("gitdir:"))
+                {
                     let gitdir_path = gitdir_line
                         .strip_prefix("gitdir:")
                         .map(|s| s.trim())
@@ -129,11 +129,7 @@ pub enum Framework {
 impl Framework {
     fn extra_args(&self, port: u16) -> Vec<String> {
         match self {
-            Framework::Vite => vec![
-                "--port".to_string(),
-                port.to_string(),
-                "--host".to_string(),
-            ],
+            Framework::Vite => vec!["--port".to_string(), port.to_string(), "--host".to_string()],
             Framework::Astro => vec![
                 "--port".to_string(),
                 port.to_string(),
@@ -150,11 +146,9 @@ impl Framework {
             Framework::Expo => vec!["--port".to_string(), port.to_string()],
             Framework::Nuxt => vec!["--port".to_string(), port.to_string()],
             Framework::Remix => vec!["--port".to_string(), port.to_string()],
-            Framework::SvelteKit => vec![
-                "--port".to_string(),
-                port.to_string(),
-                "--host".to_string(),
-            ],
+            Framework::SvelteKit => {
+                vec!["--port".to_string(), port.to_string(), "--host".to_string()]
+            }
             Framework::Unknown => vec![],
         }
     }
@@ -224,6 +218,7 @@ pub fn extra_args_for_port(cwd: &Path, _args: &[&str], port: u16) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
 
@@ -297,7 +292,10 @@ mod tests {
         assert_eq!(sanitize_hostname("feature/login"), "feature-login");
         assert_eq!(sanitize_hostname("api_v2"), "api-v2");
         assert_eq!(sanitize_hostname("  hello--world  "), "hello-world");
-        assert_eq!(sanitize_hostname("test___multiple___underscores"), "test-multiple-underscores");
+        assert_eq!(
+            sanitize_hostname("test___multiple___underscores"),
+            "test-multiple-underscores"
+        );
         assert_eq!(sanitize_hostname("UPPERCASE"), "uppercase");
     }
 
@@ -347,14 +345,8 @@ mod tests {
             strip_runner_prefix(&["pnpm", "exec", "remix", "dev"]),
             &["remix", "dev"]
         );
-        assert_eq!(
-            strip_runner_prefix(&["yarn", "exec", "nuxt"]),
-            &["nuxt"]
-        );
-        assert_eq!(
-            strip_runner_prefix(&["bunx", "vite"]),
-            &["vite"]
-        );
+        assert_eq!(strip_runner_prefix(&["yarn", "exec", "nuxt"]), &["nuxt"]);
+        assert_eq!(strip_runner_prefix(&["bunx", "vite"]), &["vite"]);
         assert_eq!(
             strip_runner_prefix(&["deno", "run", "server.ts"]),
             &["server.ts"]

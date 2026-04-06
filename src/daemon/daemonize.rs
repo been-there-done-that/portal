@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::error::Result;
+use std::path::Path;
 
 /// Write the current PID to a file.
 pub fn write_pid_file(path: &Path, pid: u32) -> Result<()> {

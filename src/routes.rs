@@ -1,9 +1,9 @@
+use crate::error::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
@@ -62,10 +62,7 @@ impl RouteStore {
 
     /// List all routes.
     pub fn list(&self) -> Vec<Route> {
-        self.map
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
+        self.map.iter().map(|entry| entry.value().clone()).collect()
     }
 
     /// Remove routes with dead PIDs.
@@ -94,10 +91,7 @@ impl RouteStore {
 
     /// Persist all routes to disk atomically.
     fn persist(&self) -> Result<()> {
-        let routes: Vec<Route> = self.map
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
+        let routes: Vec<Route> = self.map.iter().map(|entry| entry.value().clone()).collect();
 
         let json = serde_json::to_string_pretty(&routes)?;
         let tmp_path = format!("{}.tmp", self.path.display());
@@ -119,19 +113,16 @@ pub fn pid_alive_check(pid: u32) -> bool {
         use std::process::Command;
 
         // Use `kill -0` to check if process exists without sending a signal
-        let output = Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .output();
+        let output = Command::new("kill").arg("-0").arg(pid.to_string()).output();
 
         matches!(output, Ok(output) if output.status.success())
     }
 
     #[cfg(windows)]
     {
+        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::OpenProcess;
         use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
-        use windows_sys::Win32::Foundation::CloseHandle;
 
         unsafe {
             // Try to open the process with query information access

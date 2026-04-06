@@ -3,10 +3,7 @@ use crate::proto::Response;
 /// Print a generic response. If not ok, print error to stderr and exit(1).
 pub fn print_response(resp: &Response) {
     if !resp.ok {
-        let msg = resp
-            .error
-            .as_deref()
-            .unwrap_or("unknown error");
+        let msg = resp.error.as_deref().unwrap_or("unknown error");
         eprintln!("error: {msg}");
         std::process::exit(1);
     }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::dirs_for_state;
-use crate::proto::{Command, Response, read_frame, write_frame};
+use crate::proto::{read_frame, write_frame, Command, Response};
 use crate::routes::RouteStore;
 
 pub struct IpcServer {
@@ -66,11 +66,7 @@ async fn handle_connection(
     write_frame(&mut stream, &response).await.ok();
 }
 
-async fn dispatch(
-    cmd: Command,
-    routes: RouteStore,
-    start_time: std::time::Instant,
-) -> Response {
+async fn dispatch(cmd: Command, routes: RouteStore, start_time: std::time::Instant) -> Response {
     match cmd {
         Command::Ls => {
             let _ = routes.remove_stale();
@@ -98,7 +94,7 @@ async fn dispatch(
                 Some(route) => {
                     #[cfg(unix)]
                     {
-                        use nix::sys::signal::{Signal, kill};
+                        use nix::sys::signal::{kill, Signal};
                         use nix::unistd::Pid;
                         kill(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
@@ -144,8 +140,6 @@ async fn dispatch(
             }
         }
 
-        Command::Run { .. } => {
-            Response::err("use portless run from CLI")
-        }
+        Command::Run { .. } => Response::err("use portless run from CLI"),
     }
 }

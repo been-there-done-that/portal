@@ -6,6 +6,10 @@ description = "Local dev proxy — named .localhost URLs instead of port numbers
 license = "Apache-2.0"
 repository = "https://github.com/vercel/portless"
 
+[lib]
+name = "portless"
+path = "src/lib.rs"
+
 [[bin]]
 name = "portless"
 path = "src/main.rs"

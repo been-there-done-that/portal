@@ -121,8 +121,7 @@ mod tests {
         let json = serde_json::to_string(&cmd).expect("Failed to serialize");
 
         // Deserialize back
-        let deserialized: Command =
-            serde_json::from_str(&json).expect("Failed to deserialize");
+        let deserialized: Command = serde_json::from_str(&json).expect("Failed to deserialize");
 
         // Verify
         if let Command::Run {
@@ -188,9 +187,7 @@ mod tests {
             .expect("Failed to write frame");
 
         // Read frame from server side
-        let received: Command = read_frame(&mut server)
-            .await
-            .expect("Failed to read frame");
+        let received: Command = read_frame(&mut server).await.expect("Failed to read frame");
 
         // Verify
         if let Command::Run {

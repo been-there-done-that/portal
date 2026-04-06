@@ -24,8 +24,7 @@ impl CertStore {
     /// Creates `dir` and `dir/hosts/` if they do not already exist.
     pub fn new(dir: PathBuf) -> Self {
         let hosts_dir = dir.join("hosts");
-        std::fs::create_dir_all(&hosts_dir)
-            .expect("failed to create cert directory");
+        std::fs::create_dir_all(&hosts_dir).expect("failed to create cert directory");
         CertStore {
             dir,
             cache: Arc::new(DashMap::new()),
@@ -50,7 +49,9 @@ impl CertStore {
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2034, 1, 1);
-        params.distinguished_name.push(DnType::CommonName, "Portless Local CA");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Portless Local CA");
 
         // Self-sign
         let cert = params
@@ -60,7 +61,10 @@ impl CertStore {
         std::fs::write(&ca_pem_path, cert.pem())?;
         std::fs::write(&ca_key_path, key_pair.serialize_pem())?;
 
-        tracing::info!("Generated local CA certificate at {}", ca_pem_path.display());
+        tracing::info!(
+            "Generated local CA certificate at {}",
+            ca_pem_path.display()
+        );
         Ok(())
     }
 
@@ -109,7 +113,9 @@ impl CertStore {
             .map_err(|e| Error::Cert(format!("failed to build host params: {e}")))?;
         host_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         host_params.not_after = rcgen::date_time_ymd(2026, 1, 1);
-        host_params.distinguished_name.push(DnType::CommonName, hostname);
+        host_params
+            .distinguished_name
+            .push(DnType::CommonName, hostname);
 
         let host_cert = host_params
             .signed_by(&host_key, &ca_cert, &ca_key_pair)
@@ -138,21 +144,23 @@ fn safe_hostname(hostname: &str) -> String {
     hostname.replace('.', "_").replace('*', "wildcard")
 }
 
-fn load_certified_key(cert_path: &std::path::Path, key_path: &std::path::Path) -> Result<CertifiedKey> {
+fn load_certified_key(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<CertifiedKey> {
     // Load cert chain
     let cert_pem = std::fs::read(cert_path)?;
     let certs: Vec<CertificateDer<'static>> = {
         let mut reader = BufReader::new(cert_pem.as_slice());
-        rustls_pemfile::certs(&mut reader)
-            .collect::<std::io::Result<Vec<_>>>()?
+        rustls_pemfile::certs(&mut reader).collect::<std::io::Result<Vec<_>>>()?
     };
 
     // Load private key
     let key_pem = std::fs::read(key_path)?;
     let key = {
         let mut reader = BufReader::new(key_pem.as_slice());
-        let keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut reader)
-            .collect::<std::io::Result<Vec<_>>>()?;
+        let keys: Vec<_> =
+            rustls_pemfile::pkcs8_private_keys(&mut reader).collect::<std::io::Result<Vec<_>>>()?;
         let key_der = keys
             .into_iter()
             .next()
@@ -179,7 +187,9 @@ fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
             "trustRoot",
             "-k",
             "/Library/Keychains/System.keychain",
-            ca_path.to_str().ok_or_else(|| Error::Cert("invalid CA path".into()))?,
+            ca_path
+                .to_str()
+                .ok_or_else(|| Error::Cert("invalid CA path".into()))?,
         ])
         .status()?;
     if !status.success() {
@@ -214,7 +224,9 @@ fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
             "-addstore",
             "-f",
             "Root",
-            ca_path.to_str().ok_or_else(|| Error::Cert("invalid CA path".into()))?,
+            ca_path
+                .to_str()
+                .ok_or_else(|| Error::Cert("invalid CA path".into()))?,
         ])
         .status()?;
     if !status.success() {
@@ -228,7 +240,9 @@ fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn install_system_trust_impl(_ca_path: &std::path::Path) -> Result<()> {
-    Err(Error::Cert("system trust store installation not supported on this OS".into()))
+    Err(Error::Cert(
+        "system trust store installation not supported on this OS".into(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -247,10 +261,7 @@ impl PortlessCertResolver {
 }
 
 impl rustls::server::ResolvesServerCert for PortlessCertResolver {
-    fn resolve(
-        &self,
-        client_hello: rustls::server::ClientHello<'_>,
-    ) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let name = client_hello.server_name()?;
         self.store.cert_for_host(name).ok()
     }
@@ -277,7 +288,10 @@ mod tests {
         store.ensure_ca().expect("ensure_ca failed");
 
         assert!(store.dir.join("ca.pem").exists(), "ca.pem should exist");
-        assert!(store.dir.join("ca-key.pem").exists(), "ca-key.pem should exist");
+        assert!(
+            store.dir.join("ca-key.pem").exists(),
+            "ca-key.pem should exist"
+        );
     }
 
     #[test]
@@ -305,9 +319,7 @@ mod tests {
     fn host_cert_cached_on_second_call() {
         let (_tmp, store) = make_store();
         store.ensure_ca().expect("ensure_ca");
-        let first = store
-            .cert_for_host("cached.localhost")
-            .expect("first call");
+        let first = store.cert_for_host("cached.localhost").expect("first call");
         let second = store
             .cert_for_host("cached.localhost")
             .expect("second call");

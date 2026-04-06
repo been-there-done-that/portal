@@ -3,10 +3,14 @@ pub mod output;
 use clap::{Parser, Subcommand};
 
 use crate::error::Result;
-use crate::proto::{Command, read_frame, write_frame};
+use crate::proto::{read_frame, write_frame, Command};
 
 #[derive(Parser)]
-#[command(name = "portless", version, about = "Named .localhost URLs for local dev")]
+#[command(
+    name = "portless",
+    version,
+    about = "Named .localhost URLs for local dev"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: CliCommand,
@@ -143,14 +147,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             let config = crate::config::Config::load(&cwd)?;
             let hostname =
                 crate::detect::resolve_hostname(&cwd, hostname.as_deref(), &config.proxy.tld);
-            let port = port
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    crate::ports::find_free_port(
-                        config.proxy.port_range.0,
-                        config.proxy.port_range.1,
-                    )
-                })?;
+            let port = port.map(Ok).unwrap_or_else(|| {
+                crate::ports::find_free_port(config.proxy.port_range.0, config.proxy.port_range.1)
+            })?;
 
             // Register the route with the daemon via IPC
             let my_pid = std::process::id();
@@ -167,9 +166,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .await?;
                 // The daemon will respond with an error ("use portless run from CLI")
                 // which we intentionally ignore here — spawn is our responsibility.
-                let _: crate::proto::Response = read_frame(&mut stream).await.unwrap_or(
-                    crate::proto::Response::ok_empty(),
-                );
+                let _: crate::proto::Response = read_frame(&mut stream)
+                    .await
+                    .unwrap_or(crate::proto::Response::ok_empty());
             }
 
             let mut child = crate::process::spawn_child(&cwd, &args, port).await?;
@@ -223,9 +222,7 @@ async fn ensure_daemon_running() -> Result<()> {
     }
     // Auto-start daemon
     let exe = std::env::current_exe()?;
-    tokio::process::Command::new(exe)
-        .arg("daemon")
-        .spawn()?;
+    tokio::process::Command::new(exe).arg("daemon").spawn()?;
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {

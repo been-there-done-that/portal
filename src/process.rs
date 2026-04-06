@@ -1,14 +1,10 @@
+use crate::error::Result;
 use std::path::Path;
 use tokio::process::Command;
-use crate::error::Result;
 
 /// Spawn a child dev server process.
 /// Sets PORT=<port> env var. Calls extra_args_for_port to inject framework flags.
-pub async fn spawn_child(
-    cwd: &Path,
-    args: &[String],
-    port: u16,
-) -> Result<tokio::process::Child> {
+pub async fn spawn_child(cwd: &Path, args: &[String], port: u16) -> Result<tokio::process::Child> {
     if args.is_empty() {
         return Err(crate::error::Error::Ipc(
             "No arguments provided to spawn_child".to_string(),

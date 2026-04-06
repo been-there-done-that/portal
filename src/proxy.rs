@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
-use hyper_util::client::legacy::{Client, connect::HttpConnector};
+use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
-use tokio::net::TcpStream;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
 pub const HOP_HEADER: &str = "x-portless-hops";
 pub const MAX_HOPS: u8 = 5;
@@ -18,7 +18,9 @@ pub fn is_tls_client_hello(first_byte: u8) -> bool {
 }
 
 pub fn full_body(text: impl Into<Bytes>) -> BoxBodyType {
-    Full::new(text.into()).map_err(|never| match never {}).boxed()
+    Full::new(text.into())
+        .map_err(|never| match never {})
+        .boxed()
 }
 
 /// Peek at the first byte of a TcpStream without consuming it.
@@ -107,11 +109,7 @@ pub async fn handle_https_request(
         .to_string();
 
     // Strip port from hostname if present
-    let hostname = hostname
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let hostname = hostname.split(':').next().unwrap_or("").to_string();
 
     if hops >= MAX_HOPS {
         let body = crate::pages::page_508(&hostname);
@@ -173,16 +171,14 @@ pub async fn handle_https_request(
 
     // Increment hop header
     let new_hops = hops + 1;
-    parts.headers.insert(
-        HOP_HEADER,
-        new_hops.to_string().parse().unwrap(),
-    );
+    parts
+        .headers
+        .insert(HOP_HEADER, new_hops.to_string().parse().unwrap());
 
     // Add X-Forwarded-Proto
-    parts.headers.insert(
-        "x-forwarded-proto",
-        "https".parse().unwrap(),
-    );
+    parts
+        .headers
+        .insert("x-forwarded-proto", "https".parse().unwrap());
 
     let upstream_req = Request::from_parts(parts, body);
 
@@ -266,8 +262,8 @@ mod tests {
 
     #[tokio::test]
     async fn http_redirect_listener_sends_301() {
-        use tokio::net::TcpListener;
         use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
 
         // Bind to a random port
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -290,8 +286,16 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
 
-        assert!(response.contains("301"), "Expected 301 in response: {}", response);
-        assert!(response.contains("https://"), "Expected https:// in response: {}", response);
+        assert!(
+            response.contains("301"),
+            "Expected 301 in response: {}",
+            response
+        );
+        assert!(
+            response.contains("https://"),
+            "Expected https:// in response: {}",
+            response
+        );
     }
 
     #[test]
@@ -307,10 +311,7 @@ mod tests {
         assert!(is_websocket_upgrade(&req_with_upgrade));
 
         // Build request without Upgrade header
-        let req_without_upgrade = Request::builder()
-            .uri("/")
-            .body(())
-            .unwrap();
+        let req_without_upgrade = Request::builder().uri("/").body(()).unwrap();
 
         assert!(!is_websocket_upgrade(&req_without_upgrade));
     }

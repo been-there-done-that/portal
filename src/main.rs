@@ -1,15 +1,15 @@
-mod error;
-mod config;
-mod proto;
-mod routes;
-mod ports;
-mod pages;
 mod certs;
-mod detect;
-mod process;
-mod proxy;
-mod daemon;
 mod cli;
+mod config;
+mod daemon;
+mod detect;
+mod error;
+mod pages;
+mod ports;
+mod process;
+mod proto;
+mod proxy;
+mod routes;
 
 use clap::Parser;
 use error::Result;

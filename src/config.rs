@@ -1,6 +1,6 @@
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use crate::error::Result;
 
 /// Proxy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,33 +41,17 @@ impl Default for DaemonConfig {
 }
 
 /// Project configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: Option<String>,
 }
 
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self { name: None }
-    }
-}
-
 /// Complete configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     pub proxy: ProxyConfig,
     pub daemon: DaemonConfig,
     pub project: ProjectConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            proxy: ProxyConfig::default(),
-            daemon: DaemonConfig::default(),
-            project: ProjectConfig::default(),
-        }
-    }
 }
 
 /// Partial config for deserialization from TOML files
@@ -111,7 +95,10 @@ impl Config {
         let env_vars: Vec<(String, String)> = std::env::vars()
             .filter(|(k, _)| k.starts_with("PORTLESS_"))
             .collect();
-        let env_refs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let env_refs: Vec<(&str, &str)> = env_vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         Self::load_with_paths(global_path, project_path, &env_refs)
     }
 
@@ -184,7 +171,10 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
         match *key {
             "PORTLESS_TLD" => config.proxy.tld = value.to_string(),
             "PORTLESS_HTTPS" => {
-                config.proxy.https = matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+                config.proxy.https = matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                );
             }
             "PORTLESS_HTTP_PORT" => {
                 config.proxy.http_port = value.parse()?;
