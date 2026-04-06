@@ -1,8 +1,8 @@
 mod error;
+mod proto;
 
 // Stub modules — will be implemented in subsequent tasks
 // mod config;
-// mod proto;
 // mod routes;
 // mod ports;
 // mod pages;
