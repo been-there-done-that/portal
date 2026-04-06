@@ -11,6 +11,9 @@ pub enum Error {
     #[error("TOML error: {0}")]
     Toml(#[from] toml::de::Error),
 
+    #[error("Parse error: {0}")]
+    Parse(#[from] std::num::ParseIntError),
+
     #[error("TLS error: {0}")]
     Tls(#[from] rustls::Error),
 

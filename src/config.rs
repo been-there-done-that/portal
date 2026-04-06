@@ -1,0 +1,386 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use crate::error::Result;
+
+/// Proxy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    pub tld: String,
+    pub port_range: (u16, u16),
+    pub https: bool,
+    pub http_port: u16,
+    pub https_port: u16,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            tld: "localhost".to_string(),
+            port_range: (4000, 4999),
+            https: true,
+            http_port: 80,
+            https_port: 443,
+        }
+    }
+}
+
+/// Daemon configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    pub log_level: String,
+    pub auto_start: bool,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            log_level: "info".to_string(),
+            auto_start: true,
+        }
+    }
+}
+
+/// Project configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub name: Option<String>,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self { name: None }
+    }
+}
+
+/// Complete configuration
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub proxy: ProxyConfig,
+    pub daemon: DaemonConfig,
+    pub project: ProjectConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            proxy: ProxyConfig::default(),
+            daemon: DaemonConfig::default(),
+            project: ProjectConfig::default(),
+        }
+    }
+}
+
+/// Partial config for deserialization from TOML files
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PartialConfig {
+    #[serde(default)]
+    proxy: PartialProxyConfig,
+    #[serde(default)]
+    daemon: PartialDaemonConfig,
+    #[serde(default)]
+    project: PartialProjectConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PartialProxyConfig {
+    tld: Option<String>,
+    port_range: Option<(u16, u16)>,
+    https: Option<bool>,
+    http_port: Option<u16>,
+    https_port: Option<u16>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PartialDaemonConfig {
+    log_level: Option<String>,
+    auto_start: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PartialProjectConfig {
+    name: Option<String>,
+}
+
+impl Config {
+    /// Load configuration from default paths (used at runtime)
+    pub fn load(cwd: &Path) -> Result<Self> {
+        let global_path = dirs::home_dir().map(|h| h.join(".portless/config.toml"));
+        let project_path = find_project_toml(cwd);
+
+        // Collect env vars that matter - need to leak them for the static lifetime
+        let leaked_vars: Vec<(&'static str, &'static str)> = std::env::vars()
+            .filter_map(|(k, v)| {
+                if k.starts_with("PORTLESS_") {
+                    let k_static: &'static str = Box::leak(k.into_boxed_str());
+                    let v_static: &'static str = Box::leak(v.into_boxed_str());
+                    Some((k_static, v_static))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Self::load_with_paths(global_path, project_path, &leaked_vars)
+    }
+
+    /// Load configuration with explicit paths (used in tests)
+    pub fn load_with_paths(
+        global_path: Option<PathBuf>,
+        project_path: Option<PathBuf>,
+        env_overrides: &[(&str, &str)],
+    ) -> Result<Self> {
+        let mut config = Config::default();
+
+        // Layer 1: Load global config
+        if let Some(path) = global_path {
+            if path.exists() {
+                let contents = std::fs::read_to_string(&path)?;
+                let partial: PartialConfig = toml::from_str(&contents)?;
+                apply_partial(&mut config, partial);
+            }
+        }
+
+        // Layer 2: Load project config (overrides global)
+        if let Some(path) = project_path {
+            if path.exists() {
+                let contents = std::fs::read_to_string(&path)?;
+                let partial: PartialConfig = toml::from_str(&contents)?;
+                apply_partial(&mut config, partial);
+            }
+        }
+
+        // Layer 3: Apply env var overrides
+        apply_env_overrides(&mut config, env_overrides)?;
+
+        Ok(config)
+    }
+}
+
+/// Apply a partial config to a full config (overrides defaults)
+fn apply_partial(config: &mut Config, partial: PartialConfig) {
+    if let Some(tld) = partial.proxy.tld {
+        config.proxy.tld = tld;
+    }
+    if let Some(port_range) = partial.proxy.port_range {
+        config.proxy.port_range = port_range;
+    }
+    if let Some(https) = partial.proxy.https {
+        config.proxy.https = https;
+    }
+    if let Some(http_port) = partial.proxy.http_port {
+        config.proxy.http_port = http_port;
+    }
+    if let Some(https_port) = partial.proxy.https_port {
+        config.proxy.https_port = https_port;
+    }
+
+    if let Some(log_level) = partial.daemon.log_level {
+        config.daemon.log_level = log_level;
+    }
+    if let Some(auto_start) = partial.daemon.auto_start {
+        config.daemon.auto_start = auto_start;
+    }
+
+    if let Some(name) = partial.project.name {
+        config.project.name = Some(name);
+    }
+}
+
+/// Apply environment variable overrides
+fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> Result<()> {
+    for (key, value) in env_overrides {
+        match *key {
+            "PORTLESS_TLD" => config.proxy.tld = value.to_string(),
+            "PORTLESS_HTTPS" => {
+                config.proxy.https = *value == "1" || *value == "true";
+            }
+            "PORTLESS_HTTP_PORT" => {
+                config.proxy.http_port = value.parse()?;
+            }
+            "PORTLESS_HTTPS_PORT" => {
+                config.proxy.https_port = value.parse()?;
+            }
+            _ => {
+                // Ignore unknown env vars
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Search upward from cwd for portless.toml
+pub fn find_project_toml(cwd: &Path) -> Option<PathBuf> {
+    let mut current = cwd.to_path_buf();
+    loop {
+        let toml_path = current.join("portless.toml");
+        if toml_path.exists() {
+            return Some(toml_path);
+        }
+
+        if !current.pop() {
+            // Reached root
+            return None;
+        }
+    }
+}
+
+/// Returns ~/.portless/
+pub fn dirs_for_state() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".portless"))
+        .unwrap_or_else(|| PathBuf::from(".portless"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn defaults_when_no_files() {
+        let config = Config::load_with_paths(None, None, &[]).unwrap();
+
+        assert_eq!(config.proxy.tld, "localhost");
+        assert_eq!(config.proxy.port_range, (4000, 4999));
+        assert_eq!(config.proxy.https, true);
+        assert_eq!(config.proxy.http_port, 80);
+        assert_eq!(config.proxy.https_port, 443);
+        assert_eq!(config.daemon.auto_start, true);
+        assert_eq!(config.daemon.log_level, "info");
+        assert_eq!(config.project.name, None);
+    }
+
+    #[test]
+    fn global_toml_overrides_defaults() {
+        let temp = TempDir::new().unwrap();
+        let global_path = temp.path().join("config.toml");
+
+        // Write global config
+        std::fs::write(
+            &global_path,
+            r#"
+[proxy]
+tld = "test"
+https_port = 8443
+
+[daemon]
+log_level = "debug"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_paths(Some(global_path), None, &[]).unwrap();
+
+        assert_eq!(config.proxy.tld, "test");
+        assert_eq!(config.proxy.https_port, 8443);
+        // http_port should still be default 80
+        assert_eq!(config.proxy.http_port, 80);
+        // https should still be default true
+        assert_eq!(config.proxy.https, true);
+        assert_eq!(config.daemon.log_level, "debug");
+    }
+
+    #[test]
+    fn project_toml_overrides_global() {
+        let temp = TempDir::new().unwrap();
+        let global_path = temp.path().join("global.toml");
+        let project_path = temp.path().join("project.toml");
+
+        // Write global config
+        std::fs::write(
+            &global_path,
+            r#"
+[proxy]
+tld = "test"
+"#,
+        )
+        .unwrap();
+
+        // Write project config (overrides global)
+        std::fs::write(
+            &project_path,
+            r#"
+[proxy]
+tld = "local"
+
+[project]
+name = "my-project"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_paths(Some(global_path), Some(project_path), &[]).unwrap();
+
+        assert_eq!(config.proxy.tld, "local");
+        assert_eq!(config.project.name, Some("my-project".to_string()));
+    }
+
+    #[test]
+    fn env_vars_override_toml() {
+        let temp = TempDir::new().unwrap();
+        let global_path = temp.path().join("config.toml");
+
+        // Write global config
+        std::fs::write(
+            &global_path,
+            r#"
+[proxy]
+tld = "test"
+"#,
+        )
+        .unwrap();
+
+        let env_overrides = [("PORTLESS_TLD", "myenv")];
+        let config = Config::load_with_paths(Some(global_path), None, &env_overrides).unwrap();
+
+        assert_eq!(config.proxy.tld, "myenv");
+    }
+
+    #[test]
+    fn env_vars_parse_correctly() {
+        let env_overrides = [
+            ("PORTLESS_TLD", "custom.local"),
+            ("PORTLESS_HTTPS", "0"),
+            ("PORTLESS_HTTP_PORT", "8080"),
+            ("PORTLESS_HTTPS_PORT", "8443"),
+        ];
+        let config = Config::load_with_paths(None, None, &env_overrides).unwrap();
+
+        assert_eq!(config.proxy.tld, "custom.local");
+        assert_eq!(config.proxy.https, false);
+        assert_eq!(config.proxy.http_port, 8080);
+        assert_eq!(config.proxy.https_port, 8443);
+    }
+
+    #[test]
+    fn find_project_toml_in_current_dir() {
+        let temp = TempDir::new().unwrap();
+        let toml_path = temp.path().join("portless.toml");
+        std::fs::write(&toml_path, "").unwrap();
+
+        let found = find_project_toml(temp.path());
+        assert_eq!(found, Some(toml_path));
+    }
+
+    #[test]
+    fn find_project_toml_upward() {
+        let temp = TempDir::new().unwrap();
+        let toml_path = temp.path().join("portless.toml");
+        std::fs::write(&toml_path, "").unwrap();
+
+        // Create a subdirectory
+        let subdir = temp.path().join("src").join("lib");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        // Search from subdirectory should find it
+        let found = find_project_toml(&subdir);
+        assert_eq!(found, Some(toml_path));
+    }
+
+    #[test]
+    fn find_project_toml_returns_none_when_not_found() {
+        let temp = TempDir::new().unwrap();
+        let found = find_project_toml(temp.path());
+        assert_eq!(found, None);
+    }
+}
