@@ -9,8 +9,9 @@ mod certs;
 mod detect;
 mod process;
 
+mod proxy;
+
 // Stub modules — will be implemented in subsequent tasks
-// mod proxy;
 // mod daemon;
 // mod cli;
 
