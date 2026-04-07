@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { filtered, selectedId, selectRequest } from '$lib/stores/requests.svelte.js';
+  import { store, selectRequest } from '$lib/stores/requests.svelte.js';
   import type { RequestMeta } from '$lib/api.js';
 
   function methodVariant(method: string): 'default' | 'secondary' | 'destructive' | 'outline' {
@@ -26,14 +26,14 @@
 <div class="flex h-full w-[300px] flex-shrink-0 flex-col border-r border-border bg-background">
   <!-- Header -->
   <div class="flex items-center justify-between border-b border-border px-3 py-2">
-    <span class="font-mono text-[11px] text-muted-foreground">{filtered.length} requests</span>
+    <span class="font-mono text-[11px] text-muted-foreground">{store.filtered.length} requests</span>
   </div>
 
   <ScrollArea class="flex-1">
-    {#each filtered as req (req.id)}
+    {#each store.filtered as req (req.id)}
       <button
         class="w-full border-l-2 px-3 py-2 text-left font-mono transition-colors hover:bg-accent/30
-               {selectedId === req.id ? 'border-primary bg-accent/50' : 'border-transparent'}"
+               {store.selectedId === req.id ? 'border-primary bg-accent/50' : 'border-transparent'}"
         onclick={() => selectRequest(req.id)}
       >
         <div class="flex items-center gap-2">
@@ -50,7 +50,7 @@
       </button>
     {/each}
 
-    {#if filtered.length === 0}
+    {#if store.filtered.length === 0}
       <div class="px-4 py-8 text-center font-mono text-xs text-muted-foreground">
         No requests yet
       </div>

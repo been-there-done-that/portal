@@ -3,10 +3,7 @@
   import { Separator } from '$lib/components/ui/separator/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import {
-    filterHostname,
-    filterMethods,
-    filterErrors,
-    hostnames,
+    store,
     loadHistory,
     setFilterHostname,
     setFilterMethods,
@@ -17,13 +14,13 @@
   const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
 
   function toggleMethod(m: string) {
-    const next = new Set(filterMethods);
+    const next = new Set(store.filterMethods);
     next.has(m) ? next.delete(m) : next.add(m);
     setFilterMethods(next);
   }
 
   async function clearHistory() {
-    await deleteAllRequests(filterHostname ?? undefined);
+    await deleteAllRequests(store.filterHostname ?? undefined);
     await loadHistory();
   }
 </script>
@@ -34,7 +31,7 @@
     <p class="mb-2 text-[10px] uppercase tracking-widest text-muted-foreground">Routes</p>
 
     <button
-      class="w-full rounded px-2 py-1.5 text-left transition-colors {filterHostname === null
+      class="w-full rounded px-2 py-1.5 text-left transition-colors {store.filterHostname === null
         ? 'bg-accent text-accent-foreground'
         : 'hover:bg-accent/50 text-muted-foreground'}"
       onclick={() => { setFilterHostname(null); }}
@@ -42,9 +39,9 @@
       All routes
     </button>
 
-    {#each hostnames as hostname}
+    {#each store.hostnames as hostname}
       <button
-        class="w-full rounded px-2 py-1.5 text-left transition-colors {filterHostname === hostname
+        class="w-full rounded px-2 py-1.5 text-left transition-colors {store.filterHostname === hostname
           ? 'bg-accent text-accent-foreground'
           : 'hover:bg-accent/50 text-muted-foreground'}"
         onclick={() => { setFilterHostname(hostname); }}
@@ -63,16 +60,16 @@
       {#each METHODS as method}
         <button onclick={() => toggleMethod(method)}>
           <Badge
-            variant={filterMethods.has(method) ? 'default' : 'outline'}
+            variant={store.filterMethods.has(method) ? 'default' : 'outline'}
             class="cursor-pointer px-2 py-0.5 text-[10px]"
           >
             {method}
           </Badge>
         </button>
       {/each}
-      <button onclick={() => { setFilterErrors(!filterErrors); }}>
+      <button onclick={() => { setFilterErrors(!store.filterErrors); }}>
         <Badge
-          variant={filterErrors ? 'destructive' : 'outline'}
+          variant={store.filterErrors ? 'destructive' : 'outline'}
           class="cursor-pointer px-2 py-0.5 text-[10px]"
         >
           errors
