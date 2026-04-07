@@ -305,61 +305,84 @@ async fn ensure_daemon_running(
         return Ok(());
     }
 
-    // If ca.pem doesn't exist yet, the daemon will generate it on first start.
-    // Show a cert step so the user knows something is happening.
     let ca_pem_path = crate::config::dirs_for_state().join("ca.pem");
-    let mut cert_pb: Option<indicatif::ProgressBar> = if !ca_pem_path.exists() {
-        Some(setup.begin_step("cert", "generating CA certificate…"))
-    } else {
-        None
-    };
-
-    let daemon_pb = setup.begin_step("daemon", "starting…");
-
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(err) => {
-            if let Some(pb) = cert_pb.take() {
-                pb.abandon_with_message(format!("{} cert    failed", console::style("✗").red()));
-            }
-            daemon_pb.abandon_with_message(format!("{} daemon  failed to start", console::style("✗").red()));
-            return Err(err.into());
-        }
-    };
+    let ca_missing = !ca_pem_path.exists();
+    let exe = std::env::current_exe()?;
     let needs_sudo = config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
-    let spawn_result: std::io::Result<std::process::Child> = if needs_sudo {
-        // Suspend indicatif spinners so sudo can use the terminal for its password prompt.
-        setup.suspend(|| {
-            std::process::Command::new("sudo")
-                .arg(&exe)
-                .arg("daemon")
-                .env("PORTAL_IS_DAEMON", "1")
-                .spawn()
-        })
-    } else {
-        std::process::Command::new(&exe)
+
+    if needs_sudo {
+        // sudo needs raw terminal access for its password prompt — it can't share
+        // the terminal with indicatif's spinner loop. Use plain text instead.
+        if ca_missing {
+            setup.plain_step("cert     generating CA certificate…");
+        }
+        setup.plain_step("daemon   starting  (sudo required — password prompt incoming)");
+        if let Err(err) = std::process::Command::new("sudo")
+            .arg(&exe)
             .arg("daemon")
             .env("PORTAL_IS_DAEMON", "1")
             .spawn()
-    };
-    if let Err(err) = spawn_result {
+        {
+            return Err(err.into());
+        }
+    } else {
+        // No sudo needed: use animated spinners.
+        let mut cert_pb: Option<indicatif::ProgressBar> = if ca_missing {
+            Some(setup.begin_step("cert", "generating CA certificate…"))
+        } else {
+            None
+        };
+        let daemon_pb = setup.begin_step("daemon", "starting…");
+
+        if let Err(err) = std::process::Command::new(&exe)
+            .arg("daemon")
+            .env("PORTAL_IS_DAEMON", "1")
+            .spawn()
+        {
+            if let Some(pb) = cert_pb.take() {
+                pb.abandon_with_message(format!("{} cert    failed", console::style("✗").red()));
+            }
+            daemon_pb.abandon_with_message(format!(
+                "{} daemon  failed to start",
+                console::style("✗").red()
+            ));
+            return Err(err.into());
+        }
+
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            if tokio::net::UnixStream::connect(&sock).await.is_ok() {
+                if let Some(pb) = cert_pb.take() {
+                    pb.finish_with_message(format!(
+                        "{} cert    generated",
+                        console::style("✓").green()
+                    ));
+                }
+                daemon_pb.finish_with_message(format!(
+                    "{} daemon  started  on :{}/:{}",
+                    console::style("✓").green(),
+                    config.proxy.http_port,
+                    config.proxy.https_port,
+                ));
+                return Ok(());
+            }
+        }
+
         if let Some(pb) = cert_pb.take() {
             pb.abandon_with_message(format!("{} cert    failed", console::style("✗").red()));
         }
-        daemon_pb.abandon_with_message(format!("{} daemon  failed to start", console::style("✗").red()));
-        return Err(err.into());
+        daemon_pb.abandon_with_message(format!(
+            "{} daemon  failed to start",
+            console::style("✗").red()
+        ));
+        return Err(crate::error::Error::DaemonNotRunning);
     }
 
+    // sudo path: poll the socket (sudo exits after launching the daemon).
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {
-            if let Some(pb) = cert_pb.take() {
-                pb.finish_with_message(format!(
-                    "{} cert    generated",
-                    console::style("✓").green()
-                ));
-            }
-            daemon_pb.finish_with_message(format!(
+            setup.plain_step(&format!(
                 "{} daemon  started  on :{}/:{}",
                 console::style("✓").green(),
                 config.proxy.http_port,
@@ -369,16 +392,6 @@ async fn ensure_daemon_running(
         }
     }
 
-    if let Some(pb) = cert_pb.take() {
-        pb.abandon_with_message(format!(
-            "{} cert    failed",
-            console::style("✗").red()
-        ));
-    }
-    daemon_pb.abandon_with_message(format!(
-        "{} daemon  failed to start",
-        console::style("✗").red()
-    ));
     Err(crate::error::Error::DaemonNotRunning)
 }
 

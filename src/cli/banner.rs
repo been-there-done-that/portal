@@ -86,11 +86,12 @@ impl SetupPrinter {
         pb
     }
 
-    /// Temporarily suspend spinner rendering, run `f`, then resume.
-    /// Use this before spawning a subprocess (like `sudo`) that needs clean
-    /// terminal access for a password prompt.
-    pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
-        self.mp.suspend(f)
+    /// Print a plain (non-animated) step line into the setup block.
+    /// Use instead of `begin_step` when spinners would interfere with a
+    /// sub-process that needs raw terminal access (e.g. `sudo` password prompts).
+    pub fn plain_step(&mut self, msg: &str) {
+        self.ensure_header();
+        eprintln!("  {}", console::style(msg).dim());
     }
 
     /// Print the `╰─ ready` footer and clear the MultiProgress.
