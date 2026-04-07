@@ -26,9 +26,6 @@ pub enum CliCommand {
         hostname: Option<String>,
         #[arg(long)]
         port: Option<u16>,
-        /// Kill any existing instance for this hostname before starting
-        #[arg(long)]
-        force: bool,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -143,49 +140,63 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Run {
             hostname,
             port,
-            force,
             args,
         } => {
-            // Allow --force anywhere in the arg list (clap trailing_var_arg swallows flags
-            // that appear after the first positional argument).
-            let force = force || args.iter().any(|a| a == "--force");
-            let args: Vec<String> = args.into_iter().filter(|a| a != "--force").collect();
-
-            ensure_daemon_running().await?;
+            // Load cwd + config first (needed for port range and hostname resolution)
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
+            ensure_daemon_running().await?;
             let hostname =
                 crate::detect::resolve_hostname(&cwd, hostname.as_deref(), &config.proxy.tld);
 
-            // Check for an existing live route for this hostname
-            {
+            // Check for an existing live route for this hostname (replace-by-default)
+            let reuse_port: Option<u16> = {
                 let mut stream = ipc_connect().await?;
                 write_frame(&mut stream, &Command::Ls).await?;
                 let resp: crate::proto::Response = read_frame(&mut stream).await?;
                 if let Some(serde_json::Value::Array(routes)) = resp.data {
-                    if let Some(existing) = routes.iter().find(|r| {
-                        r["hostname"].as_str() == Some(&hostname)
-                    }) {
-                        if force {
-                            // Kill the existing instance via Stop
-                            let mut s = ipc_connect().await?;
-                            write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
-                            let _: crate::proto::Response = read_frame(&mut s).await?;
-                            eprintln!("  stopped existing instance on port {}", existing["port"].as_u64().unwrap_or(0));
-                        } else {
-                            eprintln!(
-                                "error: {hostname} is already running on port {} (use --force to replace it)",
-                                existing["port"].as_u64().unwrap_or(0)
-                            );
-                            std::process::exit(1);
-                        }
-                    }
+                    routes
+                        .iter()
+                        .find(|r| r["hostname"].as_str() == Some(&hostname))
+                        .and_then(|r| r["port"].as_u64())
+                        .and_then(|p| u16::try_from(p).ok())
+                } else {
+                    None
                 }
-            }
+            };
 
-            let port = port.map(Ok).unwrap_or_else(|| {
-                crate::ports::find_free_port(config.proxy.port_range.0, config.proxy.port_range.1)
-            })?;
+            // Determine backend port:
+            //   1. User pinned --port  → use it (stop old if exists)
+            //   2. Existing route      → stop old, reuse its port
+            //   3. No existing route   → find a free port
+            let port = if let Some(explicit_port) = port {
+                if let Some(old_port) = reuse_port {
+                    let mut s = ipc_connect().await?;
+                    write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+                    let _: crate::proto::Response = read_frame(&mut s).await?;
+                    eprintln!("  replaced existing instance (port {})", old_port);
+                    crate::ports::wait_for_port_free(
+                        explicit_port,
+                        std::time::Duration::from_secs(2),
+                    )
+                    .await;
+                }
+                explicit_port
+            } else if let Some(old_port) = reuse_port {
+                // Replace-by-default: stop old, reuse its port
+                let mut s = ipc_connect().await?;
+                write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+                let _: crate::proto::Response = read_frame(&mut s).await?;
+                eprintln!("  replaced existing instance (port {})", old_port);
+                crate::ports::wait_for_port_free(old_port, std::time::Duration::from_secs(2))
+                    .await;
+                old_port
+            } else {
+                crate::ports::find_free_port(
+                    config.proxy.port_range.0,
+                    config.proxy.port_range.1,
+                )?
+            };
 
             let my_pid = std::process::id();
             let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname).await?;
@@ -214,8 +225,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             child.wait().await?;
 
-            // Don't send Rm here — if --force replaced us, our Rm would wipe the
-            // new route. Instead, rely on remove_stale() (called by `portless ls`)
+            // Don't send Rm here — rely on remove_stale() (called by `portal ls`)
             // to clean up dead routes automatically.
         }
     }
