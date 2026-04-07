@@ -12,8 +12,8 @@ use crate::routes::RouteStore;
 /// Uses the re-spawn approach to avoid fork-in-async-runtime problems:
 /// - If PORTAL_IS_DAEMON=1 is set, we are already in the daemon process:
 ///   run the daemon loop directly.
-/// - Otherwise, spawn a fresh copy of the binary with PORTAL_IS_DAEMON=1,
-///   then exit.
+/// - Otherwise, check if privileged ports need sudo, escalate if necessary,
+///   then spawn a fresh copy of the binary with PORTAL_IS_DAEMON=1 and exit.
 pub async fn start() -> Result<()> {
     if std::env::var("PORTAL_IS_DAEMON").as_deref() == Ok("1") {
         run_daemon_loop().await
@@ -27,9 +27,43 @@ pub async fn start() -> Result<()> {
             return Ok(());
         }
 
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let config = Config::load(&cwd)?;
+
+        let needs_sudo = !cfg!(windows)
+            && (config.proxy.http_port < 1024 || config.proxy.https_port < 1024);
+
+        #[cfg(unix)]
+        let is_root = unsafe { nix::libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let is_root = true;
+
+        let exe = std::env::current_exe()?;
+
+        if needs_sudo && !is_root {
+            // Privileged ports require root. Re-run this command under sudo so
+            // the user sees the password prompt — same flow as `portal run`.
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                eprintln!("error: ports <1024 require sudo but no TTY is available.");
+                return Err(crate::error::Error::DaemonNotRunning);
+            }
+            let status = std::process::Command::new("sudo")
+                .arg(&exe)
+                .arg("daemon")
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .status()?;
+            if !status.success() {
+                eprintln!("portal: sudo failed — daemon not started");
+                return Err(crate::error::Error::DaemonNotRunning);
+            }
+            return Ok(());
+        }
+
         // Spawn a detached copy of ourselves as the real daemon.
         // Forward SUDO_* vars so the child can chown state files correctly.
-        let exe = std::env::current_exe()?;
         let mut cmd = tokio::process::Command::new(exe);
         cmd.arg("daemon")
             .env("PORTAL_IS_DAEMON", "1")
@@ -56,14 +90,29 @@ async fn run_daemon_loop() -> Result<()> {
     // so CLI commands (run as the real user) can also write to it.
     #[cfg(unix)]
     if let Some((uid, gid)) = crate::config::sudo_uid_gid() {
-        for path in [
-            state_dir.as_path(),
-            &state_dir.join("logs"),
-            &state_dir.join("certs"),
-        ] {
+        let certs_dir = state_dir.join("certs");
+        let chown_paths: Vec<std::path::PathBuf> = vec![
+            state_dir.clone(),
+            state_dir.join("logs"),
+            certs_dir.clone(),
+            certs_dir.join("ca.pem"),
+            certs_dir.join("ca-key.pem"),
+            certs_dir.join("hosts"),
+            state_dir.join("routes.json"),
+        ];
+        for path in &chown_paths {
             unsafe {
                 let p = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
                 nix::libc::chown(p.as_ptr(), uid, gid);
+            }
+        }
+        // Also chown any existing host certs so the non-root daemon can read them
+        if let Ok(entries) = std::fs::read_dir(certs_dir.join("hosts")) {
+            for entry in entries.flatten() {
+                unsafe {
+                    let p = std::ffi::CString::new(entry.path().to_string_lossy().as_bytes()).unwrap();
+                    nix::libc::chown(p.as_ptr(), uid, gid);
+                }
             }
         }
     }
@@ -92,6 +141,31 @@ async fn run_daemon_loop() -> Result<()> {
     // Init cert store
     let cert_store = CertStore::new(state_dir.join("certs"));
     cert_store.ensure_ca()?;
+    // Pre-generate the portal.localhost cert at startup so TLS works on first connection.
+    // When the daemon runs as root (normal path via ensure_daemon_running), this writes the
+    // cert to disk before the chown loop hands ownership back to the user.
+    let _ = cert_store.cert_for_host("_.localhost");
+
+    // Start inspector (background worker + axum server at _.localhost)
+    let inspector = match crate::inspector::Inspector::start(state_dir.join("inspector.db")).await {
+        Ok(insp) => {
+            // Register _.localhost in the route table
+            let _ = routes.insert(crate::routes::Route {
+                hostname: "_.localhost".to_string(),
+                port: insp.port,
+                pid: std::process::id(),
+                owner_pid: std::process::id(),
+                cwd: String::new(),
+                created_at: chrono::Utc::now(),
+            });
+            tracing::info!("portal inspector started at _.localhost (internal port {})", insp.port);
+            Some(insp.sender)
+        }
+        Err(e) => {
+            tracing::warn!("portal inspector failed to start: {e}");
+            None
+        }
+    };
 
     // Bind listeners
     let http_bind = format!("0.0.0.0:{}", config.proxy.http_port);
@@ -115,7 +189,7 @@ async fn run_daemon_loop() -> Result<()> {
     {
         let cs = cert_store.clone();
         let rt = routes.clone();
-        tokio::spawn(serve_https(https_listener, cs, rt));
+        tokio::spawn(serve_https(https_listener, cs, rt, inspector.clone()));
     }
 
     // Start IPC server (blocks)
@@ -149,7 +223,12 @@ fn redirect_stdio(log_path: &std::path::Path) {
     let _ = log_path;
 }
 
-async fn serve_https(listener: tokio::net::TcpListener, cert_store: CertStore, routes: RouteStore) {
+async fn serve_https(
+    listener: tokio::net::TcpListener,
+    cert_store: CertStore,
+    routes: RouteStore,
+    inspector: Option<crate::inspector::InspectorSender>,
+) {
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use rustls::ServerConfig;
@@ -170,6 +249,7 @@ async fn serve_https(listener: tokio::net::TcpListener, cert_store: CertStore, r
         };
         let acceptor = acceptor.clone();
         let routes = routes.clone();
+        let inspector = inspector.clone();
         tokio::spawn(async move {
             let first = match crate::proxy::peek_first_byte(&tcp_stream).await {
                 Ok(b) => b,
@@ -188,7 +268,8 @@ async fn serve_https(listener: tokio::net::TcpListener, cert_store: CertStore, r
                     io,
                     hyper::service::service_fn(move |req| {
                         let r = routes.clone();
-                        async move { crate::proxy::handle_https_request(req, r).await }
+                        let insp = inspector.clone();
+                        async move { crate::proxy::handle_https_request(req, r, insp).await }
                     }),
                 )
                 .with_upgrades()
