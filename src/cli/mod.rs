@@ -303,7 +303,7 @@ async fn ensure_daemon_running(
     let sock = crate::config::dirs_for_state().join("portal.sock");
 
     // Fast path: daemon is already running — return immediately, no UI.
-    if sock.exists() && tokio::net::UnixStream::connect(&sock).await.is_ok() {
+    if tokio::net::UnixStream::connect(&sock).await.is_ok() {
         return Ok(());
     }
 
@@ -312,7 +312,6 @@ async fn ensure_daemon_running(
         && (config.proxy.http_port < 1024 || config.proxy.https_port < 1024);
     let ca_missing = !crate::config::dirs_for_state().join("ca.pem").exists();
 
-    // Non-TTY guard: sudo needs an interactive terminal for its password/Touch ID prompt.
     if needs_sudo {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() {
@@ -325,9 +324,7 @@ async fn ensure_daemon_running(
             eprintln!("    https_port = 8443");
             return Err(crate::error::Error::DaemonNotRunning);
         }
-    }
 
-    if needs_sudo {
         // Plain-text path — no indicatif spinners that could corrupt the TTY that sudo needs.
         if ca_missing {
             setup.plain_step("cert     generating CA certificate…");
@@ -337,9 +334,12 @@ async fn ensure_daemon_running(
         // Single blocking call — gives sudo full TTY access so the password prompt
         // and Touch ID (if configured in /etc/pam.d/sudo_local) both work naturally.
         //
-        // `portal daemon` without PORTAL_IS_DAEMON spawns a background grandchild
-        // daemon and exits in <100 ms, so status() returns quickly after authentication.
-        // The grandchild continues running as root and binds ports 80/443.
+        // We intentionally do NOT pass PORTAL_IS_DAEMON=1 here:
+        //   1. sudo strips unknown env vars, so .env() on this Command won't reach portal.
+        //   2. `portal daemon` without PORTAL_IS_DAEMON enters daemon::start()'s else-branch:
+        //      it forwards SUDO_USER/SUDO_UID/SUDO_GID to a grandchild, then exits quickly.
+        //   3. The grandchild runs run_daemon_loop() as root with the correct state dir.
+        // This mirrors how portless handles it: spawnSync("sudo", args, { stdio: "inherit" }).
         let status = tokio::process::Command::new("sudo")
             .arg(&exe)
             .arg("daemon")
@@ -409,7 +409,7 @@ async fn ensure_daemon_running(
         return Err(err.into());
     }
 
-    for _ in 0..20 {
+    for _ in 0..67 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {
             if let Some(pb) = cert_pb.take() {
