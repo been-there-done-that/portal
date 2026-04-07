@@ -147,96 +147,101 @@ pub async fn run(cli: Cli) -> Result<()> {
             port,
             args,
         } => {
-            // Load cwd + config first (needed for port range and hostname resolution)
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
-            let mut setup = banner::SetupPrinter::new();
-            ensure_daemon_running(&config, &mut setup).await?;
-            ensure_cert_trusted(&mut setup).await?;
-            setup.done();
-            let hostname =
-                crate::detect::resolve_hostname(&cwd, hostname.as_deref(), &config.proxy.tld);
-
-            // Check for an existing live route for this hostname (replace-by-default)
-            let reuse_port: Option<u16> = {
-                let mut stream = ipc_connect().await?;
-                write_frame(&mut stream, &Command::Ls).await?;
-                let resp: crate::proto::Response = read_frame(&mut stream).await?;
-                if let Some(serde_json::Value::Array(routes)) = resp.data {
-                    routes
-                        .iter()
-                        .find(|r| r["hostname"].as_str() == Some(&hostname))
-                        .and_then(|r| r["port"].as_u64())
-                        .and_then(|p| u16::try_from(p).ok())
-                } else {
-                    None
-                }
-            };
-
-            // Determine backend port:
-            //   1. User pinned --port  → use it (stop old if exists)
-            //   2. Existing route      → stop old, reuse its port
-            //   3. No existing route   → find a free port
-            let port = if let Some(explicit_port) = port {
-                if let Some(old_port) = reuse_port {
-                    let mut s = ipc_connect().await?;
-                    write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
-                    let _: crate::proto::Response = read_frame(&mut s).await?;
-                    eprintln!("  replaced existing instance (port {})", old_port);
-                    crate::ports::wait_for_port_free(
-                        explicit_port,
-                        std::time::Duration::from_secs(2),
-                    )
-                    .await;
-                }
-                explicit_port
-            } else if let Some(old_port) = reuse_port {
-                // Replace-by-default: stop old, reuse its port
-                let mut s = ipc_connect().await?;
-                write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
-                let _: crate::proto::Response = read_frame(&mut s).await?;
-                eprintln!("  replaced existing instance (port {})", old_port);
-                crate::ports::wait_for_port_free(old_port, std::time::Duration::from_secs(2))
-                    .await;
-                old_port
-            } else {
-                crate::ports::find_free_port(
-                    config.proxy.port_range.0,
-                    config.proxy.port_range.1,
-                )?
-            };
-
-            let my_pid = std::process::id();
-            let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname).await?;
-
-            eprintln!("  https://{hostname}  ->  port {port}");
-
-            // Register the route in the daemon's live in-memory store via IPC
-            {
-                let child_pid = child.id().unwrap_or(my_pid);
-                if let Ok(mut stream) = ipc_connect().await {
-                    let _ = write_frame(
-                        &mut stream,
-                        &Command::RegisterRoute {
-                            hostname: hostname.clone(),
-                            port,
-                            pid: child_pid,
-                            cwd: cwd.to_string_lossy().to_string(),
-                        },
-                    )
-                    .await;
-                    let _: crate::proto::Response = read_frame(&mut stream)
-                        .await
-                        .unwrap_or(crate::proto::Response::ok_empty());
-                }
-            }
-
-            child.wait().await?;
-
-            // Don't send Rm here — rely on remove_stale() (called by `portal ls`)
-            // to clean up dead routes automatically.
+            do_run(cwd, config, args, hostname, port).await?;
         }
     }
+
+    Ok(())
+}
+
+/// Core dev-server run logic shared by both `Run` and `Start`.
+async fn do_run(
+    cwd: std::path::PathBuf,
+    config: crate::config::Config,
+    args: Vec<String>,
+    hostname_override: Option<String>,
+    port_override: Option<u16>,
+) -> Result<()> {
+    let mut setup = banner::SetupPrinter::new();
+    ensure_daemon_running(&config, &mut setup).await?;
+    ensure_cert_trusted(&mut setup).await?;
+    setup.done();
+
+    let hostname =
+        crate::detect::resolve_hostname(&cwd, hostname_override.as_deref(), &config.proxy.tld);
+
+    // Check for an existing live route for this hostname (replace-by-default)
+    let reuse_port: Option<u16> = {
+        let mut stream = ipc_connect().await?;
+        write_frame(&mut stream, &Command::Ls).await?;
+        let resp: crate::proto::Response = read_frame(&mut stream).await?;
+        if let Some(serde_json::Value::Array(routes)) = resp.data {
+            routes
+                .iter()
+                .find(|r| r["hostname"].as_str() == Some(&hostname))
+                .and_then(|r| r["port"].as_u64())
+                .and_then(|p| u16::try_from(p).ok())
+        } else {
+            None
+        }
+    };
+
+    // Determine backend port:
+    //   1. User pinned --port  → use it (stop old if exists)
+    //   2. Existing route      → stop old, reuse its port
+    //   3. No existing route   → find a free port
+    let port = if let Some(explicit_port) = port_override {
+        if let Some(_old_port) = reuse_port {
+            let mut s = ipc_connect().await?;
+            write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+            let _: crate::proto::Response = read_frame(&mut s).await?;
+            crate::ports::wait_for_port_free(
+                explicit_port,
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+        }
+        explicit_port
+    } else if let Some(old_port) = reuse_port {
+        let mut s = ipc_connect().await?;
+        write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+        let _: crate::proto::Response = read_frame(&mut s).await?;
+        crate::ports::wait_for_port_free(old_port, std::time::Duration::from_secs(2))
+            .await;
+        old_port
+    } else {
+        crate::ports::find_free_port(
+            config.proxy.port_range.0,
+            config.proxy.port_range.1,
+        )?
+    };
+
+    let my_pid = std::process::id();
+    let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname).await?;
+
+    // Register the route in the daemon's live in-memory store via IPC
+    let child_pid = child.id().unwrap_or(my_pid);
+    if let Ok(mut stream) = ipc_connect().await {
+        let _ = write_frame(
+            &mut stream,
+            &Command::RegisterRoute {
+                hostname: hostname.clone(),
+                port,
+                pid: child_pid,
+                cwd: cwd.to_string_lossy().to_string(),
+            },
+        )
+        .await;
+        let _: crate::proto::Response = read_frame(&mut stream)
+            .await
+            .unwrap_or(crate::proto::Response::ok_empty());
+    }
+
+    banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
+
+    child.wait().await?;
 
     Ok(())
 }
