@@ -176,7 +176,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     let _: crate::proto::Response = read_frame(&mut s).await?;
                     eprintln!("  replaced existing instance (port {})", old_port);
                     crate::ports::wait_for_port_free(
-                        explicit_port,
+                        old_port,
                         std::time::Duration::from_secs(2),
                     )
                     .await;
