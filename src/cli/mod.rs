@@ -327,14 +327,17 @@ async fn ensure_daemon_running(
         }
     };
     let needs_sudo = config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
-    let spawn_result = if needs_sudo {
-        tokio::process::Command::new("sudo")
-            .arg(&exe)
-            .arg("daemon")
-            .env("PORTAL_IS_DAEMON", "1")
-            .spawn()
+    let spawn_result: std::io::Result<std::process::Child> = if needs_sudo {
+        // Suspend indicatif spinners so sudo can use the terminal for its password prompt.
+        setup.suspend(|| {
+            std::process::Command::new("sudo")
+                .arg(&exe)
+                .arg("daemon")
+                .env("PORTAL_IS_DAEMON", "1")
+                .spawn()
+        })
     } else {
-        tokio::process::Command::new(&exe)
+        std::process::Command::new(&exe)
             .arg("daemon")
             .env("PORTAL_IS_DAEMON", "1")
             .spawn()

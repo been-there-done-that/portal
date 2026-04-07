@@ -86,6 +86,13 @@ impl SetupPrinter {
         pb
     }
 
+    /// Temporarily suspend spinner rendering, run `f`, then resume.
+    /// Use this before spawning a subprocess (like `sudo`) that needs clean
+    /// terminal access for a password prompt.
+    pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
+        self.mp.suspend(f)
+    }
+
     /// Print the `╰─ ready` footer and clear the MultiProgress.
     /// No-op if no steps were started (nothing to display).
     pub fn done(self) {
