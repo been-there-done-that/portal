@@ -23,6 +23,11 @@ export const filtered = $derived(
 
 export const hostnames = $derived([...new Set(requests.map((r) => r.hostname))]);
 
+// ── Setters ────────────────────────────────────────────────────────────────
+export function setFilterHostname(value: string | null) { filterHostname = value; }
+export function setFilterMethods(value: Set<string>) { filterMethods = value; }
+export function setFilterErrors(value: boolean) { filterErrors = value; }
+
 // ── Actions ────────────────────────────────────────────────────────────────
 export async function loadHistory() {
   loading = true;
