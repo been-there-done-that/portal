@@ -63,7 +63,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         CliCommand::Ls => {
-            ensure_daemon_running().await?;
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::Config::load(&cwd)?;
+            ensure_daemon_running(&config).await?;
             let mut stream = ipc_connect().await?;
             write_frame(&mut stream, &Command::Ls).await?;
             let resp = read_frame(&mut stream).await?;
@@ -145,7 +147,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Load cwd + config first (needed for port range and hostname resolution)
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
-            ensure_daemon_running().await?;
+            ensure_daemon_running(&config).await?;
+            ensure_cert_trusted().await?;
             let hostname =
                 crate::detect::resolve_hostname(&cwd, hostname.as_deref(), &config.proxy.tld);
 
@@ -240,17 +243,27 @@ async fn ipc_connect() -> Result<tokio::net::UnixStream> {
         .map_err(|_| crate::error::Error::DaemonNotRunning)
 }
 
-async fn ensure_daemon_running() -> Result<()> {
+async fn ensure_daemon_running(config: &crate::config::Config) -> Result<()> {
     let sock = crate::config::dirs_for_state().join("portal.sock");
     if sock.exists() && tokio::net::UnixStream::connect(&sock).await.is_ok() {
         return Ok(());
     }
-    // Auto-start daemon
     let exe = std::env::current_exe()?;
-    tokio::process::Command::new(exe)
-        .arg("daemon")
-        .env("PORTAL_IS_DAEMON", "1")
-        .spawn()?;
+    let needs_sudo =
+        config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
+    if needs_sudo {
+        eprintln!("  portal: starting daemon (requires sudo for ports 80/443)...");
+        tokio::process::Command::new("sudo")
+            .arg(&exe)
+            .arg("daemon")
+            .env("PORTAL_IS_DAEMON", "1")
+            .spawn()?;
+    } else {
+        tokio::process::Command::new(&exe)
+            .arg("daemon")
+            .env("PORTAL_IS_DAEMON", "1")
+            .spawn()?;
+    }
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {
@@ -258,4 +271,25 @@ async fn ensure_daemon_running() -> Result<()> {
         }
     }
     Err(crate::error::Error::DaemonNotRunning)
+}
+
+async fn ensure_cert_trusted() -> Result<()> {
+    if crate::certs::is_ca_trusted() {
+        return Ok(());
+    }
+    eprintln!("  portal: trusting CA certificate (requires sudo)...");
+    let exe = std::env::current_exe()?;
+    let status = tokio::process::Command::new("sudo")
+        .arg(&exe)
+        .arg("cert")
+        .arg("install")
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(crate::error::Error::Ipc(
+            "Failed to install CA certificate. Run `sudo portal cert install` manually."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
