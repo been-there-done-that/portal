@@ -529,4 +529,25 @@ mod tests {
         let json = serde_json::json!({ "scripts": {} });
         assert_eq!(pick_dev_script(&json), None);
     }
+
+    #[test]
+    fn smart_run_detection_scenario() {
+        // Simulates: portal run dev → pnpm run dev
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("pnpm-lock.yaml"), "").unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            serde_json::json!({ "scripts": { "dev": "vite" } }).to_string(),
+        )
+        .unwrap();
+
+        // First arg is not a known runner
+        assert!(!is_known_runner("dev"));
+        // Package manager is pnpm
+        assert_eq!(detect_package_manager(temp.path()), "pnpm");
+        // Script exists
+        let contents = std::fs::read_to_string(temp.path().join("package.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert!(json["scripts"]["dev"].is_string());
+    }
 }
