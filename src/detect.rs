@@ -82,6 +82,7 @@ pub fn resolve_run_args(cwd: &std::path::Path, args: Vec<String>) -> Vec<String>
 }
 
 /// Strip known package runner prefixes from argv slice.
+#[allow(dead_code)]
 pub fn strip_runner_prefix<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
     if args.is_empty() {
         return args;
@@ -613,5 +614,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = resolve_run_args(temp.path(), vec![]);
         assert_eq!(result, Vec::<String>::new());
+    }
+
+    #[test]
+    fn smart_run_detection_scenario() {
+        // Documents end-to-end: portal run dev → pnpm run dev
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("pnpm-lock.yaml"), "").unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            serde_json::json!({ "scripts": { "dev": "vite" } }).to_string(),
+        )
+        .unwrap();
+        let result = resolve_run_args(temp.path(), vec!["dev".to_string()]);
+        assert_eq!(result, vec!["pnpm", "run", "dev"]);
     }
 }
