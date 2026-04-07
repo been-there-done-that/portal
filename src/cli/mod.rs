@@ -286,7 +286,7 @@ async fn ensure_cert_trusted() -> Result<()> {
         .status()
         .await?;
     if !status.success() {
-        return Err(crate::error::Error::Ipc(
+        return Err(crate::error::Error::Cert(
             "Failed to install CA certificate. Run `sudo portal cert install` manually."
                 .to_string(),
         ));
