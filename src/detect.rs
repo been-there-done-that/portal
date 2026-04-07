@@ -2,6 +2,49 @@ use crate::error::Result;
 use std::fs;
 use std::path::Path;
 
+/// Known package runners / executors. If `args[0]` is NOT in this list and
+/// `package.json` has a matching script, we prepend `<pm> run` automatically.
+pub const KNOWN_RUNNERS: &[&str] = &[
+    "npm", "pnpm", "yarn", "bun", "node", "deno", "npx", "bunx", "pnpx",
+    "python", "python3", "ruby", "go", "cargo", "java", "sh", "bash", "zsh", "fish",
+];
+
+/// Returns true if `cmd` is a known package runner / executor.
+pub fn is_known_runner(cmd: &str) -> bool {
+    KNOWN_RUNNERS.contains(&cmd)
+}
+
+/// Detect which package manager to use based on lock files in `cwd`.
+/// Checked in priority order: pnpm → bun → yarn → npm (default).
+pub fn detect_package_manager(cwd: &Path) -> &'static str {
+    if cwd.join("pnpm-lock.yaml").exists() {
+        return "pnpm";
+    }
+    if cwd.join("bun.lockb").exists() || cwd.join("bun.lock").exists() {
+        return "bun";
+    }
+    if cwd.join("yarn.lock").exists() {
+        return "yarn";
+    }
+    "npm"
+}
+
+/// Pick the best dev script from a parsed `package.json` value.
+/// Priority: dev → start → serve → develop → first script alphabetically.
+/// Returns `None` if the JSON has no `scripts` object or it is empty.
+pub fn pick_dev_script(json: &serde_json::Value) -> Option<String> {
+    let scripts = json.get("scripts")?.as_object()?;
+    if scripts.is_empty() {
+        return None;
+    }
+    for &preferred in &["dev", "start", "serve", "develop"] {
+        if scripts.contains_key(preferred) {
+            return Some(preferred.to_string());
+        }
+    }
+    scripts.keys().min().cloned()
+}
+
 /// Strip known package runner prefixes from argv slice.
 pub fn strip_runner_prefix<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
     if args.is_empty() {
@@ -372,6 +415,75 @@ mod tests {
 
         let hostname = resolve_hostname(temp.path(), None, "localhost");
         assert_eq!(hostname, "myapp.localhost");
+    }
+
+    #[test]
+    fn known_runners_basic() {
+        assert!(is_known_runner("npm"));
+        assert!(is_known_runner("pnpm"));
+        assert!(is_known_runner("node"));
+        assert!(!is_known_runner("vite"));
+        assert!(!is_known_runner("dev"));
+    }
+
+    #[test]
+    fn detects_pnpm_from_lock() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(detect_package_manager(temp.path()), "pnpm");
+    }
+
+    #[test]
+    fn detects_bun_from_lockb() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("bun.lockb"), "").unwrap();
+        assert_eq!(detect_package_manager(temp.path()), "bun");
+    }
+
+    #[test]
+    fn detects_yarn_from_lock() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("yarn.lock"), "").unwrap();
+        assert_eq!(detect_package_manager(temp.path()), "yarn");
+    }
+
+    #[test]
+    fn defaults_to_npm() {
+        let temp = TempDir::new().unwrap();
+        assert_eq!(detect_package_manager(temp.path()), "npm");
+    }
+
+    #[test]
+    fn pnpm_beats_yarn_when_both_present() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("pnpm-lock.yaml"), "").unwrap();
+        fs::write(temp.path().join("yarn.lock"), "").unwrap();
+        assert_eq!(detect_package_manager(temp.path()), "pnpm");
+    }
+
+    #[test]
+    fn picks_dev_script_priority() {
+        let json = serde_json::json!({ "scripts": { "build": "tsc", "dev": "vite", "test": "vitest" } });
+        assert_eq!(pick_dev_script(&json).as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn picks_start_when_no_dev() {
+        let json = serde_json::json!({ "scripts": { "build": "tsc", "start": "node server.js" } });
+        assert_eq!(pick_dev_script(&json).as_deref(), Some("start"));
+    }
+
+    #[test]
+    fn picks_first_alphabetically_as_fallback() {
+        let json = serde_json::json!({ "scripts": { "build": "tsc", "preview": "vite preview" } });
+        // "build" < "preview" alphabetically
+        assert_eq!(pick_dev_script(&json).as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn pick_dev_script_no_scripts() {
+        let json = serde_json::json!({ "name": "my-app" });
+        assert_eq!(pick_dev_script(&json), None);
     }
 
     #[test]
