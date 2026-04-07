@@ -378,8 +378,9 @@ async fn ensure_daemon_running(
         return Err(crate::error::Error::DaemonNotRunning);
     }
 
-    // sudo path: poll the socket (sudo exits after launching the daemon).
-    for _ in 0..20 {
+    // sudo path: poll until the daemon socket appears.
+    // Allow up to 60 s — the user needs time to type their sudo password.
+    for _ in 0..400 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {
             setup.plain_step(&format!(
