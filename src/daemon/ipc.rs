@@ -9,10 +9,18 @@ pub struct IpcServer {
     pid_path: PathBuf,
     routes: RouteStore,
     start_time: std::time::Instant,
+    http_port: u16,
+    https_port: u16,
 }
 
 impl IpcServer {
-    pub fn new(sock_path: PathBuf, pid_path: PathBuf, routes: RouteStore) -> Self {
+    pub fn new(
+        sock_path: PathBuf,
+        pid_path: PathBuf,
+        routes: RouteStore,
+        http_port: u16,
+        https_port: u16,
+    ) -> Self {
         // Remove stale socket file if it exists
         std::fs::remove_file(&sock_path).ok();
         IpcServer {
@@ -20,6 +28,8 @@ impl IpcServer {
             pid_path,
             routes,
             start_time: std::time::Instant::now(),
+            http_port,
+            https_port,
         }
     }
 
@@ -64,6 +74,8 @@ impl IpcServer {
         let start_time = self.start_time;
         let sock_path = self.sock_path.clone();
         let pid_path = self.pid_path.clone();
+        let http_port = self.http_port;
+        let https_port = self.https_port;
 
         loop {
             match listener.accept().await {
@@ -72,7 +84,7 @@ impl IpcServer {
                     let sock = sock_path.clone();
                     let pid = pid_path.clone();
                     tokio::spawn(async move {
-                        handle_connection(stream, routes, start_time, sock, pid).await;
+                        handle_connection(stream, routes, start_time, sock, pid, http_port, https_port).await;
                     });
                 }
                 Err(e) => {
@@ -89,13 +101,15 @@ async fn handle_connection(
     start_time: std::time::Instant,
     sock_path: PathBuf,
     pid_path: PathBuf,
+    http_port: u16,
+    https_port: u16,
 ) {
     let cmd: Command = match read_frame(&mut stream).await {
         Ok(c) => c,
         Err(_) => return,
     };
 
-    let response = dispatch(cmd, routes, start_time, sock_path, pid_path).await;
+    let response = dispatch(cmd, routes, start_time, sock_path, pid_path, http_port, https_port).await;
 
     write_frame(&mut stream, &response).await.ok();
 }
@@ -106,6 +120,8 @@ async fn dispatch(
     start_time: std::time::Instant,
     sock_path: PathBuf,
     pid_path: PathBuf,
+    http_port: u16,
+    https_port: u16,
 ) -> Response {
     match cmd {
         Command::Ls => {
@@ -121,6 +137,8 @@ async fn dispatch(
                 "version": env!("CARGO_PKG_VERSION"),
                 "pid": std::process::id(),
                 "uptime_secs": uptime_secs,
+                "http_port": http_port,
+                "https_port": https_port,
                 "routes_count": routes_count,
             }))
         }

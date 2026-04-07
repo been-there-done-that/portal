@@ -120,7 +120,7 @@ async fn run_daemon_loop() -> Result<()> {
 
     // Start IPC server (blocks)
     let sock_path = state_dir.join("portal.sock");
-    let ipc = ipc::IpcServer::new(sock_path, pid_path, routes.clone());
+    let ipc = ipc::IpcServer::new(sock_path, pid_path, routes.clone(), config.proxy.http_port, config.proxy.https_port);
     ipc.serve().await;
 
     Ok(())
