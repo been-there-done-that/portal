@@ -126,13 +126,17 @@ async fn dispatch(
     match cmd {
         Command::Ls => {
             let _ = routes.remove_stale();
-            let list = routes.list();
+            let list: Vec<_> = routes
+                .list()
+                .into_iter()
+                .filter(|r| r.hostname != "_.localhost")
+                .collect();
             Response::ok(serde_json::to_value(&list).unwrap_or(serde_json::Value::Array(vec![])))
         }
 
         Command::Status => {
             let uptime_secs = start_time.elapsed().as_secs();
-            let routes_count = routes.list().len();
+            let routes_count = routes.list().iter().filter(|r| r.hostname != "_.localhost").count();
             Response::ok(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "pid": std::process::id(),
@@ -222,5 +226,20 @@ async fn dispatch(
         }
 
         Command::Run { .. } => Response::err("use portal run from CLI"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ls_hides_inspector_route() {
+        let routes: Vec<String> = vec![
+            "myapp.localhost".to_string(),
+            "_.localhost".to_string(),
+            "api.localhost".to_string(),
+        ];
+        let filtered: Vec<&String> = routes.iter().filter(|h| *h != "_.localhost").collect();
+        assert_eq!(filtered.len(), 2);
+        assert!(!filtered.iter().any(|h| *h == "_.localhost"));
     }
 }
