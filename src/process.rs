@@ -228,5 +228,34 @@ mod tests {
 
             let _ = std::fs::remove_file(&test_file);
         }
+
+        #[cfg(windows)]
+        {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let random_id = rng.gen::<u32>();
+            let test_file = format!("C:\\temp\\portal_url_test_{}.txt", random_id);
+
+            let args = vec![
+                "cmd".to_string(),
+                "/C".to_string(),
+                format!("echo %PORTAL_URL% > {}", test_file),
+            ];
+
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "myapp.localhost")
+                .await
+                .expect("Failed to spawn child");
+
+            let _ = child.wait().await;
+
+            if let Ok(content) = std::fs::read_to_string(&test_file) {
+                let url_str = content.trim();
+                assert_eq!(url_str, "https://myapp.localhost");
+            } else {
+                panic!("Failed to read test file");
+            }
+
+            let _ = std::fs::remove_file(&test_file);
+        }
     }
 }
