@@ -1,7 +1,7 @@
 //! E2E framework tests — run with: cargo test --test frameworks_test -- --ignored
 
-use portless::ports::find_free_port;
-use portless::process::spawn_child;
+use portal::ports::find_free_port;
+use portal::process::spawn_child;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -25,7 +25,7 @@ async fn express_fixture_responds_via_port() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/express");
     let port = find_free_port(5000, 5999).unwrap();
     let args = vec!["node".to_string(), "server.js".to_string()];
-    let mut child = spawn_child(&fixture, &args, port).await.unwrap();
+    let mut child = spawn_child(&fixture, &args, port, "test.localhost").await.unwrap();
 
     let ready = wait_for_port(port, Duration::from_secs(10)).await;
     assert!(ready, "express fixture did not start on port {port}");
