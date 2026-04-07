@@ -188,7 +188,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             })?;
 
             let my_pid = std::process::id();
-            let mut child = crate::process::spawn_child(&cwd, &args, port).await?;
+            let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname).await?;
 
             eprintln!("  https://{hostname}  ->  port {port}");
 

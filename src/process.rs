@@ -3,8 +3,14 @@ use std::path::Path;
 use tokio::process::Command;
 
 /// Spawn a child dev server process.
-/// Sets PORT=<port> env var. Calls extra_args_for_port to inject framework flags.
-pub async fn spawn_child(cwd: &Path, args: &[String], port: u16) -> Result<tokio::process::Child> {
+/// Sets PORT=<port> and PORTAL_URL=https://<hostname> env vars.
+/// Calls extra_args_for_port to inject framework flags.
+pub async fn spawn_child(
+    cwd: &Path,
+    args: &[String],
+    port: u16,
+    hostname: &str,
+) -> Result<tokio::process::Child> {
     if args.is_empty() {
         return Err(crate::error::Error::Ipc(
             "No arguments provided to spawn_child".to_string(),
@@ -23,6 +29,7 @@ pub async fn spawn_child(cwd: &Path, args: &[String], port: u16) -> Result<tokio
     cmd.args(&rest_args)
         .args(&extra)
         .env("PORT", port.to_string())
+        .env("PORTAL_URL", format!("https://{hostname}"))
         .current_dir(cwd)
         .kill_on_drop(false);
 
@@ -78,7 +85,7 @@ mod tests {
         #[cfg(unix)]
         {
             let args = vec!["sleep".to_string(), "60".to_string()];
-            let mut child = spawn_child(Path::new("/tmp"), &args, 4321)
+            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost")
                 .await
                 .expect("Failed to spawn child");
 
@@ -103,7 +110,7 @@ mod tests {
         #[cfg(windows)]
         {
             let args = vec!["timeout".to_string(), "/T".to_string(), "60".to_string()];
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321)
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost")
                 .await
                 .expect("Failed to spawn child");
 
@@ -136,7 +143,7 @@ mod tests {
                 format!("echo $PORT > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("/tmp"), &args, 4321)
+            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost")
                 .await
                 .expect("Failed to spawn child");
 
@@ -169,7 +176,7 @@ mod tests {
                 format!("echo %PORT% > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321)
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost")
                 .await
                 .expect("Failed to spawn child");
 
@@ -185,6 +192,40 @@ mod tests {
             }
 
             // Cleanup
+            let _ = std::fs::remove_file(&test_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn child_receives_portal_url_env() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let random_id = rng.gen::<u32>();
+            let test_file = format!("/tmp/portal_url_test_{}.txt", random_id);
+
+            let args = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("echo $PORTAL_URL > {}", test_file),
+            ];
+
+            let mut child = spawn_child(
+                Path::new("/tmp"),
+                &args,
+                4321,
+                "myapp.localhost",
+            )
+            .await
+            .expect("Failed to spawn child");
+
+            let _ = child.wait().await;
+
+            let content = std::fs::read_to_string(&test_file)
+                .expect("Failed to read test file");
+            assert_eq!(content.trim(), "https://myapp.localhost");
+
             let _ = std::fs::remove_file(&test_file);
         }
     }
