@@ -105,6 +105,16 @@ impl RouteStore {
         // Atomic rename
         std::fs::rename(&tmp_path, &self.path)?;
 
+        // Chown to the invoking user when running under sudo so the non-root
+        // CLI can also read/write the file on subsequent daemon restarts.
+        #[cfg(unix)]
+        if let Some((uid, gid)) = crate::config::sudo_uid_gid() {
+            unsafe {
+                let p = std::ffi::CString::new(self.path.to_string_lossy().as_bytes()).unwrap();
+                nix::libc::chown(p.as_ptr(), uid, gid);
+            }
+        }
+
         Ok(())
     }
 }
