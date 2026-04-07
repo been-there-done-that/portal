@@ -1,6 +1,18 @@
 use crate::proto::Response;
 use console::style;
 
+fn pad_right(s: &str, width: usize) -> String {
+    let visual = console::measure_text_width(s);
+    let padding = width.saturating_sub(visual);
+    format!("{}{}", s, " ".repeat(padding))
+}
+
+fn pad_left(s: &str, width: usize) -> String {
+    let visual = console::measure_text_width(s);
+    let padding = width.saturating_sub(visual);
+    format!("{}{}", " ".repeat(padding), s)
+}
+
 /// Print a generic response. If not ok, print error to stderr and exit(1).
 pub fn print_response(resp: &Response) {
     if !resp.ok {
@@ -21,7 +33,7 @@ pub fn print_ls(resp: &Response) {
     let routes = match &resp.data {
         Some(serde_json::Value::Array(arr)) => arr.clone(),
         _ => {
-            println!("No routes.");
+            println!("{}", style("No routes.").dim());
             return;
         }
     };
@@ -31,22 +43,28 @@ pub fn print_ls(resp: &Response) {
         return;
     }
 
+    let hostname_col = style("HOSTNAME").dim().to_string();
+    let port_col = style("PORT").dim().to_string();
+    let url_col = style("URL").dim().to_string();
     println!(
-        "{:<30} {:>6}  {}",
-        style("HOSTNAME").dim(),
-        style("PORT").dim(),
-        style("URL").dim()
+        "{}  {}  {}",
+        pad_right(&hostname_col, 30),
+        pad_left(&port_col, 6),
+        url_col
     );
     println!("{}", style("─".repeat(60)).dim());
     for route in &routes {
         let hostname = route["hostname"].as_str().unwrap_or("-");
         let port = route["port"].as_u64().unwrap_or(0);
         let url = format!("https://{hostname}");
+        let hostname_styled = style(hostname).dim().to_string();
+        let port_styled = style(format!("{port}")).red().to_string();
+        let url_styled = style(url).bold().white().to_string();
         println!(
-            "{:<30} {}  {}",
-            style(hostname).dim(),
-            style(format!("{port:>6}")).red(),
-            style(url).bold().white()
+            "{}  {}  {}",
+            pad_right(&hostname_styled, 30),
+            pad_left(&port_styled, 6),
+            url_styled
         );
     }
 }
@@ -70,8 +88,23 @@ pub fn print_status(resp: &Response) {
             style(" portal ").bold().white().on_blue(),
             style(format!("v{version}")).dim()
         );
-        println!("  {}  {}", style("pid:    ").dim(), style(pid.to_string()).dim());
-        println!("  {}  {}s", style("uptime: ").dim(), style(uptime.to_string()).dim());
-        println!("  {}  {}", style("routes: ").dim(), style(routes.to_string()).green());
+        let label_w = 8; // "uptime: " is 8 chars — all labels padded to match
+        println!(
+            "  {}  {}",
+            pad_right(&style("pid:").dim().to_string(), label_w),
+            style(pid.to_string()).dim()
+        );
+        println!(
+            "  {}  {}s",
+            pad_right(&style("uptime:").dim().to_string(), label_w),
+            style(uptime.to_string()).dim()
+        );
+        println!(
+            "  {}  {}",
+            pad_right(&style("routes:").dim().to_string(), label_w),
+            style(routes.to_string()).green()
+        );
+    } else {
+        println!("{}", style("daemon running, no status data available").dim());
     }
 }
