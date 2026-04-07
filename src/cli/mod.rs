@@ -66,7 +66,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Ls => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
-            ensure_daemon_running(&config).await?;
+            let mut setup = banner::SetupPrinter::new();
+            ensure_daemon_running(&config, &mut setup).await?;
+            setup.done();
             let mut stream = ipc_connect().await?;
             write_frame(&mut stream, &Command::Ls).await?;
             let resp = read_frame(&mut stream).await?;
@@ -148,8 +150,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Load cwd + config first (needed for port range and hostname resolution)
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
-            ensure_daemon_running(&config).await?;
-            ensure_cert_trusted().await?;
+            let mut setup = banner::SetupPrinter::new();
+            ensure_daemon_running(&config, &mut setup).await?;
+            ensure_cert_trusted(&mut setup).await?;
+            setup.done();
             let hostname =
                 crate::detect::resolve_hostname(&cwd, hostname.as_deref(), &config.proxy.tld);
 
@@ -244,16 +248,29 @@ async fn ipc_connect() -> Result<tokio::net::UnixStream> {
         .map_err(|_| crate::error::Error::DaemonNotRunning)
 }
 
-async fn ensure_daemon_running(config: &crate::config::Config) -> Result<()> {
+async fn ensure_daemon_running(
+    config: &crate::config::Config,
+    setup: &mut banner::SetupPrinter,
+) -> Result<()> {
     let sock = crate::config::dirs_for_state().join("portal.sock");
     if sock.exists() && tokio::net::UnixStream::connect(&sock).await.is_ok() {
         return Ok(());
     }
+
+    // If ca.pem doesn't exist yet, the daemon will generate it on first start.
+    // Show a cert step so the user knows something is happening.
+    let ca_pem_path = crate::config::dirs_for_state().join("ca.pem");
+    let cert_pb: Option<indicatif::ProgressBar> = if !ca_pem_path.exists() {
+        Some(setup.begin_step("cert", "generating CA certificate…"))
+    } else {
+        None
+    };
+
+    let daemon_pb = setup.begin_step("daemon", "starting…");
+
     let exe = std::env::current_exe()?;
-    let needs_sudo =
-        config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
+    let needs_sudo = config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
     if needs_sudo {
-        eprintln!("  portal: starting daemon (requires sudo for ports 80/443)...");
         tokio::process::Command::new("sudo")
             .arg(&exe)
             .arg("daemon")
@@ -265,20 +282,40 @@ async fn ensure_daemon_running(config: &crate::config::Config) -> Result<()> {
             .env("PORTAL_IS_DAEMON", "1")
             .spawn()?;
     }
+
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {
+            if let Some(pb) = cert_pb {
+                pb.finish_with_message(format!(
+                    "{} cert    generated",
+                    console::style("✓").green()
+                ));
+            }
+            daemon_pb.finish_with_message(format!(
+                "{} daemon  started  on :{}/:{}",
+                console::style("✓").green(),
+                config.proxy.http_port,
+                config.proxy.https_port,
+            ));
             return Ok(());
         }
     }
+
+    daemon_pb.abandon_with_message(format!(
+        "{} daemon  failed to start",
+        console::style("✗").red()
+    ));
     Err(crate::error::Error::DaemonNotRunning)
 }
 
-async fn ensure_cert_trusted() -> Result<()> {
+async fn ensure_cert_trusted(setup: &mut banner::SetupPrinter) -> Result<()> {
     if crate::certs::is_ca_trusted() {
         return Ok(());
     }
-    eprintln!("  portal: trusting CA certificate (requires sudo)...");
+
+    let trust_pb = setup.begin_step("trust", "installing CA certificate…  (sudo required)");
+
     let exe = std::env::current_exe()?;
     let status = tokio::process::Command::new("sudo")
         .arg(&exe)
@@ -286,11 +323,21 @@ async fn ensure_cert_trusted() -> Result<()> {
         .arg("install")
         .status()
         .await?;
+
     if !status.success() {
+        trust_pb.abandon_with_message(format!(
+            "{} trust   failed  (run `sudo portal cert install` manually)",
+            console::style("✗").red()
+        ));
         return Err(crate::error::Error::Cert(
             "Failed to install CA certificate. Run `sudo portal cert install` manually."
                 .to_string(),
         ));
     }
+
+    trust_pb.finish_with_message(format!(
+        "{} trust   installed  (sudo)",
+        console::style("✓").green()
+    ));
     Ok(())
 }
