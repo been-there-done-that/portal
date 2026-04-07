@@ -191,38 +191,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
-
-            // Smart detection: if args[0] is not a known runner, check if it's
-            // a package.json script name and prepend `<pm> run` if so.
-            let resolved_args = if let Some(first) = args.first() {
-                if !crate::detect::is_known_runner(first) {
-                    let pkg_path = cwd.join("package.json");
-                    let script_exists = pkg_path.exists() && {
-                        std::fs::read_to_string(&pkg_path)
-                            .ok()
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                            .and_then(|j| {
-                                j.get("scripts")
-                                    .and_then(|s| s.as_object())
-                                    .map(|m| m.contains_key(first.as_str()))
-                            })
-                            .unwrap_or(false)
-                    };
-                    if script_exists {
-                        let pm = crate::detect::detect_package_manager(&cwd);
-                        let mut new_args = vec![pm.to_string(), "run".to_string()];
-                        new_args.extend(args);
-                        new_args
-                    } else {
-                        args
-                    }
-                } else {
-                    args
-                }
-            } else {
-                args
-            };
-
+            let resolved_args = crate::detect::resolve_run_args(&cwd, args);
             do_run(cwd, config, resolved_args, hostname, port).await?;
         }
     }

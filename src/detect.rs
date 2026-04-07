@@ -45,6 +45,42 @@ pub fn pick_dev_script(json: &serde_json::Value) -> Option<String> {
     scripts.keys().min().cloned()
 }
 
+/// Resolve the args for `portal run`. If the first arg is not a known runner
+/// and `package.json` in `cwd` contains that arg as a script name, prepend
+/// `<pm> run` using the detected package manager. Otherwise return `args` unchanged.
+pub fn resolve_run_args(cwd: &std::path::Path, args: Vec<String>) -> Vec<String> {
+    let first = match args.first() {
+        Some(f) => f.clone(),
+        None => return args,
+    };
+
+    if is_known_runner(&first) {
+        return args;
+    }
+
+    let pkg_path = cwd.join("package.json");
+    let script_exists = pkg_path.exists() && {
+        std::fs::read_to_string(&pkg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|j| {
+                j.get("scripts")
+                    .and_then(|scripts_val| scripts_val.as_object())
+                    .map(|m| m.contains_key(first.as_str()))
+            })
+            .unwrap_or(false)
+    };
+
+    if script_exists {
+        let pm = detect_package_manager(cwd);
+        let mut new_args = vec![pm.to_string(), "run".to_string()];
+        new_args.extend(args);
+        new_args
+    } else {
+        args
+    }
+}
+
 /// Strip known package runner prefixes from argv slice.
 pub fn strip_runner_prefix<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
     if args.is_empty() {
@@ -531,8 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn smart_run_detection_scenario() {
-        // Simulates: portal run dev → pnpm run dev
+    fn resolve_run_args_expands_script_name() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("pnpm-lock.yaml"), "").unwrap();
         fs::write(
@@ -540,14 +575,43 @@ mod tests {
             serde_json::json!({ "scripts": { "dev": "vite" } }).to_string(),
         )
         .unwrap();
+        let result = resolve_run_args(temp.path(), vec!["dev".to_string()]);
+        assert_eq!(result, vec!["pnpm", "run", "dev"]);
+    }
 
-        // First arg is not a known runner
-        assert!(!is_known_runner("dev"));
-        // Package manager is pnpm
-        assert_eq!(detect_package_manager(temp.path()), "pnpm");
-        // Script exists
-        let contents = std::fs::read_to_string(temp.path().join("package.json")).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert!(json["scripts"]["dev"].is_string());
+    #[test]
+    fn resolve_run_args_passthrough_known_runner() {
+        let temp = TempDir::new().unwrap();
+        let args = vec!["npm".to_string(), "run".to_string(), "dev".to_string()];
+        let result = resolve_run_args(temp.path(), args.clone());
+        assert_eq!(result, args);
+    }
+
+    #[test]
+    fn resolve_run_args_passthrough_no_package_json() {
+        let temp = TempDir::new().unwrap();
+        let args = vec!["dev".to_string()];
+        let result = resolve_run_args(temp.path(), args.clone());
+        assert_eq!(result, args);
+    }
+
+    #[test]
+    fn resolve_run_args_passthrough_script_not_found() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            serde_json::json!({ "scripts": { "build": "tsc" } }).to_string(),
+        )
+        .unwrap();
+        let args = vec!["dev".to_string()];
+        let result = resolve_run_args(temp.path(), args.clone());
+        assert_eq!(result, args);
+    }
+
+    #[test]
+    fn resolve_run_args_passthrough_empty_args() {
+        let temp = TempDir::new().unwrap();
+        let result = resolve_run_args(temp.path(), vec![]);
+        assert_eq!(result, Vec::<String>::new());
     }
 }
