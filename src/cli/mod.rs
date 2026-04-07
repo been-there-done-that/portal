@@ -311,13 +311,25 @@ async fn ensure_daemon_running(
     let needs_sudo = config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
 
     if needs_sudo {
-        // sudo needs raw terminal access for its password prompt — it can't share
-        // the terminal with indicatif's spinner loop. Use plain text instead.
         if ca_missing {
             setup.plain_step("cert     generating CA certificate…");
         }
-        setup.plain_step("daemon   starting  (sudo required — password prompt incoming)");
+        setup.plain_step("daemon   sudo required  (enter password below)");
+
+        // Step 1: authenticate only — sudo -v prompts for the password and exits.
+        // Using tokio's async .status().await keeps stdin wired to the real TTY
+        // while we wait for the user to type, with no concurrent spinner activity.
+        let auth = tokio::process::Command::new("sudo")
+            .arg("-v")
+            .status()
+            .await?;
+        if !auth.success() {
+            return Err(crate::error::Error::DaemonNotRunning);
+        }
+
+        // Step 2: spawn the daemon non-interactively using the cached credential.
         if let Err(err) = std::process::Command::new("sudo")
+            .arg("-n")
             .arg(&exe)
             .arg("daemon")
             .env("PORTAL_IS_DAEMON", "1")
