@@ -47,6 +47,8 @@ pub enum CliCommand {
     Config,
     /// Shut down the daemon
     Shutdown,
+    /// Auto-detect and start the best dev script from package.json
+    Start,
 }
 
 #[derive(Subcommand)]
@@ -150,6 +152,36 @@ pub async fn run(cli: Cli) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             do_run(cwd, config, args, hostname, port).await?;
+        }
+
+        CliCommand::Start => {
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::Config::load(&cwd)?;
+
+            let pkg_path = cwd.join("package.json");
+            if !pkg_path.exists() {
+                eprintln!(
+                    "error: no package.json found in {}. Use 'portal run <command>' to run an arbitrary command.",
+                    cwd.display()
+                );
+                std::process::exit(1);
+            }
+
+            let contents = std::fs::read_to_string(&pkg_path)?;
+            let json: serde_json::Value = serde_json::from_str(&contents)?;
+
+            let script = match crate::detect::pick_dev_script(&json) {
+                Some(s) => s,
+                None => {
+                    eprintln!("error: no scripts found in package.json. Use 'portal run <command>' to run an arbitrary command.");
+                    std::process::exit(1);
+                }
+            };
+
+            let pm = crate::detect::detect_package_manager(&cwd);
+            let args = vec![pm.to_string(), "run".to_string(), script];
+
+            do_run(cwd, config, args, None, None).await?;
         }
     }
 
