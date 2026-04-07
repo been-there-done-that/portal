@@ -120,8 +120,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Status => {
             let mut stream = ipc_connect().await?;
             write_frame(&mut stream, &Command::Status).await?;
-            let resp = read_frame(&mut stream).await?;
-            output::print_status(&resp);
+            let status_resp = read_frame(&mut stream).await?;
+
+            let mut stream2 = ipc_connect().await?;
+            write_frame(&mut stream2, &Command::Ls).await?;
+            let ls_resp = read_frame(&mut stream2).await?;
+
+            output::print_status(&status_resp, &ls_resp);
         }
 
         CliCommand::Stop { hostname } => {
