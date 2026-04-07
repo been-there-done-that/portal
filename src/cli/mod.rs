@@ -260,7 +260,7 @@ async fn ensure_daemon_running(
     // If ca.pem doesn't exist yet, the daemon will generate it on first start.
     // Show a cert step so the user knows something is happening.
     let ca_pem_path = crate::config::dirs_for_state().join("ca.pem");
-    let cert_pb: Option<indicatif::ProgressBar> = if !ca_pem_path.exists() {
+    let mut cert_pb: Option<indicatif::ProgressBar> = if !ca_pem_path.exists() {
         Some(setup.begin_step("cert", "generating CA certificate…"))
     } else {
         None
@@ -268,25 +268,41 @@ async fn ensure_daemon_running(
 
     let daemon_pb = setup.begin_step("daemon", "starting…");
 
-    let exe = std::env::current_exe()?;
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(err) => {
+            if let Some(pb) = cert_pb.take() {
+                pb.abandon_with_message(format!("{} cert    failed", console::style("✗").red()));
+            }
+            daemon_pb.abandon_with_message(format!("{} daemon  failed to start", console::style("✗").red()));
+            return Err(err.into());
+        }
+    };
     let needs_sudo = config.proxy.http_port < 1024 || config.proxy.https_port < 1024;
-    if needs_sudo {
+    let spawn_result = if needs_sudo {
         tokio::process::Command::new("sudo")
             .arg(&exe)
             .arg("daemon")
             .env("PORTAL_IS_DAEMON", "1")
-            .spawn()?;
+            .spawn()
     } else {
         tokio::process::Command::new(&exe)
             .arg("daemon")
             .env("PORTAL_IS_DAEMON", "1")
-            .spawn()?;
+            .spawn()
+    };
+    if let Err(err) = spawn_result {
+        if let Some(pb) = cert_pb.take() {
+            pb.abandon_with_message(format!("{} cert    failed", console::style("✗").red()));
+        }
+        daemon_pb.abandon_with_message(format!("{} daemon  failed to start", console::style("✗").red()));
+        return Err(err.into());
     }
 
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if tokio::net::UnixStream::connect(&sock).await.is_ok() {
-            if let Some(pb) = cert_pb {
+            if let Some(pb) = cert_pb.take() {
                 pb.finish_with_message(format!(
                     "{} cert    generated",
                     console::style("✓").green()
@@ -302,6 +318,12 @@ async fn ensure_daemon_running(
         }
     }
 
+    if let Some(pb) = cert_pb.take() {
+        pb.abandon_with_message(format!(
+            "{} cert    failed",
+            console::style("✗").red()
+        ));
+    }
     daemon_pb.abandon_with_message(format!(
         "{} daemon  failed to start",
         console::style("✗").red()
