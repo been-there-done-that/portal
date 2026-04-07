@@ -132,9 +132,14 @@ pub fn print_status(status: &Response, routes: &Response) {
             style(routes_count.to_string()).green()
         );
 
-        if routes_count > 0 {
+        // Drive the table off the actual routes response, not the status count.
+        let has_routes = matches!(&routes.data, Some(serde_json::Value::Array(arr)) if !arr.is_empty());
+        if routes.ok && has_routes {
             println!();
             print_routes_table(routes);
+        } else if !routes.ok {
+            let msg = routes.error.as_deref().unwrap_or("unknown error");
+            eprintln!("  (routes unavailable: {msg})");
         }
     } else {
         println!("{}", style("daemon running, no status data available").dim());

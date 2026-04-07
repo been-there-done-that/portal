@@ -118,6 +118,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         CliCommand::Status => {
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::Config::load(&cwd)?;
+            let mut setup = banner::SetupPrinter::new();
+            ensure_daemon_running(&config, &mut setup).await?;
+            setup.done();
+
             let mut stream = ipc_connect().await?;
             write_frame(&mut stream, &Command::Status).await?;
             let status_resp = read_frame(&mut stream).await?;
@@ -330,6 +336,27 @@ async fn ensure_daemon_running(
             return Err(crate::error::Error::DaemonNotRunning);
         }
 
+        // Check for port conflicts before attempting daemon start.
+        let conflicting = check_ports_free(&[config.proxy.http_port, config.proxy.https_port]);
+        if !conflicting.is_empty() {
+            let occupiers = discover_port_occupiers(&conflicting);
+            if occupiers.is_empty() {
+                eprintln!(
+                    "error: ports {:?} are already in use (cannot identify processes — try: sudo lsof -iTCP:{} -sTCP:LISTEN)",
+                    conflicting, conflicting[0]
+                );
+                return Err(crate::error::Error::DaemonNotRunning);
+            }
+            match show_conflict_menu(&occupiers)? {
+                ConflictAction::KillAndRetry(pids) => {
+                    kill_occupiers(&pids, &conflicting).await?;
+                }
+                ConflictAction::Cancel => {
+                    return Err(crate::error::Error::DaemonNotRunning);
+                }
+            }
+        }
+
         // Plain-text path — no indicatif spinners that could corrupt the TTY that sudo needs.
         if ca_missing {
             setup.plain_step("cert     generating CA certificate…");
@@ -478,4 +505,254 @@ async fn ensure_cert_trusted(setup: &mut banner::SetupPrinter) -> Result<()> {
         console::style("✓").green()
     ));
     Ok(())
+}
+
+// ─── Port conflict resolution ────────────────────────────────────────────────
+
+/// Returns the subset of `ports` that are already bound.
+fn check_ports_free(ports: &[u16]) -> Vec<u16> {
+    ports
+        .iter()
+        .copied()
+        .filter(|&p| std::net::TcpListener::bind(("0.0.0.0", p)).is_err())
+        .collect()
+}
+
+/// A process that is currently occupying one or more conflicting ports.
+#[derive(Debug, Clone)]
+struct PortOccupier {
+    pid: u32,
+    name: String,
+    ports: Vec<u16>,
+}
+
+/// Parse the output of `lsof -nP -iTCP:PORT -sTCP:LISTEN -F pcn` and return
+/// one `PortOccupier` per unique PID, merging ports for processes that hold
+/// multiple conflicting ports.
+fn parse_lsof_output(output: &str) -> Vec<PortOccupier> {
+    let mut by_pid: std::collections::HashMap<u32, PortOccupier> = std::collections::HashMap::new();
+    let mut cur_pid: Option<u32> = None;
+    let mut cur_name: Option<String> = None;
+
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            if let Ok(pid) = rest.parse::<u32>() {
+                cur_pid = Some(pid);
+                cur_name = None;
+            }
+        } else if let Some(rest) = line.strip_prefix('c') {
+            cur_name = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix('n') {
+            // address looks like "*:443" or "127.0.0.1:80"
+            if let Some(port_str) = rest.rsplit(':').next() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if let (Some(pid), Some(ref name)) = (cur_pid, &cur_name) {
+                        let entry = by_pid.entry(pid).or_insert_with(|| PortOccupier {
+                            pid,
+                            name: name.clone(),
+                            ports: Vec::new(),
+                        });
+                        if !entry.ports.contains(&port) {
+                            entry.ports.push(port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    by_pid.into_values().collect()
+}
+
+/// Use `lsof` to discover which processes hold the given ports.
+fn discover_port_occupiers(ports: &[u16]) -> Vec<PortOccupier> {
+    let port_args: Vec<String> = ports
+        .iter()
+        .map(|p| format!("TCP:{p}"))
+        .collect();
+
+    // Build: lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN -F pcn
+    let mut cmd = std::process::Command::new("lsof");
+    cmd.arg("-nP");
+    for a in &port_args {
+        cmd.arg(format!("-i{a}"));
+    }
+    cmd.args(["-sTCP:LISTEN", "-F", "pcn"]);
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    if output.stdout.is_empty() {
+        return Vec::new();
+    }
+
+    let text = match String::from_utf8(output.stdout) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    parse_lsof_output(&text)
+}
+
+enum ConflictAction {
+    KillAndRetry(Vec<u32>),
+    Cancel,
+}
+
+/// Show an interactive multi-select menu to let the user choose which
+/// port-occupying processes to kill.
+fn show_conflict_menu(occupiers: &[PortOccupier]) -> crate::error::Result<ConflictAction> {
+    use dialoguer::{MultiSelect, Select};
+
+    let port_list: Vec<String> = {
+        let mut all: Vec<u16> = occupiers.iter().flat_map(|o| o.ports.iter().copied()).collect();
+        all.sort_unstable();
+        all.dedup();
+        all.iter().map(|p| format!(":{p}")).collect()
+    };
+    println!(
+        "\n  {} {} are already in use\n",
+        console::style("port").red(),
+        port_list.join(" and ")
+    );
+
+    let items: Vec<String> = occupiers
+        .iter()
+        .map(|o| {
+            let ports_str = o.ports.iter().map(|p| format!(":{p}")).collect::<Vec<_>>().join(" ");
+            format!(
+                "{:<14} pid {:<8} {}",
+                o.name, o.pid, ports_str
+            )
+        })
+        .collect();
+
+    let defaults = vec![true; items.len()];
+    let selected_indices = MultiSelect::new()
+        .with_prompt("Select processes to kill")
+        .items(&items)
+        .defaults(&defaults)
+        .interact_opt()
+        .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
+
+    let selected_indices = match selected_indices {
+        Some(v) if !v.is_empty() => v,
+        _ => {
+            return Ok(ConflictAction::Cancel);
+        }
+    };
+
+    let action_items = ["Kill selected & retry", "Cancel"];
+    let action = Select::new()
+        .with_prompt("Action")
+        .items(&action_items)
+        .default(0)
+        .interact_opt()
+        .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
+
+    match action {
+        Some(0) => {
+            let pids: Vec<u32> = selected_indices.iter().map(|&i| occupiers[i].pid).collect();
+            Ok(ConflictAction::KillAndRetry(pids))
+        }
+        _ => Ok(ConflictAction::Cancel),
+    }
+}
+
+/// Kill each PID (trying direct kill first, falling back to `sudo kill` for
+/// root-owned processes), then poll up to 2 s for ports to be freed.
+async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()> {
+    for &pid in pids {
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+                Ok(_) => {}
+                Err(nix::errno::Errno::EPERM) => {
+                    // Root-owned process — escalate via sudo.
+                    let _ = tokio::process::Command::new("sudo")
+                        .args(["kill", &pid.to_string()])
+                        .stdin(std::process::Stdio::inherit())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::inherit())
+                        .status()
+                        .await;
+                }
+                Err(_) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status()
+                .await;
+        }
+    }
+
+    // Poll up to 2 s for ports to free.
+    for _ in 0..20u32 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if check_ports_free(ports).is_empty() {
+            return Ok(());
+        }
+    }
+
+    eprintln!(
+        "  {} warning: ports {:?} still occupied after kill — daemon start may fail",
+        console::style("!").yellow(),
+        ports
+    );
+    Ok(())
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_lsof_single_process_single_port() {
+        let output = "p51055\ncportless\nn*:443\n";
+        let occupiers = parse_lsof_output(output);
+        assert_eq!(occupiers.len(), 1);
+        assert_eq!(occupiers[0].pid, 51055);
+        assert_eq!(occupiers[0].name, "portless");
+        assert_eq!(occupiers[0].ports, vec![443]);
+    }
+
+    #[test]
+    fn test_parse_lsof_single_process_two_ports() {
+        let output = "p51055\ncportless\nn*:80\nn*:443\n";
+        let occupiers = parse_lsof_output(output);
+        assert_eq!(occupiers.len(), 1);
+        assert_eq!(occupiers[0].pid, 51055);
+        let mut ports = occupiers[0].ports.clone();
+        ports.sort();
+        assert_eq!(ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn test_parse_lsof_two_processes() {
+        let output = "p100\ncnginx\nn*:80\np200\ncportless\nn*:443\n";
+        let mut occupiers = parse_lsof_output(output);
+        occupiers.sort_by_key(|o| o.pid);
+        assert_eq!(occupiers.len(), 2);
+        assert_eq!(occupiers[0].pid, 100);
+        assert_eq!(occupiers[0].name, "nginx");
+        assert_eq!(occupiers[0].ports, vec![80]);
+        assert_eq!(occupiers[1].pid, 200);
+        assert_eq!(occupiers[1].name, "portless");
+        assert_eq!(occupiers[1].ports, vec![443]);
+    }
+
+    #[test]
+    fn test_parse_lsof_empty_output() {
+        let occupiers = parse_lsof_output("");
+        assert!(occupiers.is_empty());
+    }
 }
