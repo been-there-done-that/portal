@@ -49,6 +49,8 @@ pub enum CliCommand {
     Config,
     /// Shut down the daemon
     Shutdown,
+    /// Open the request inspector in the browser
+    Inspect,
 }
 
 #[derive(Subcommand)]
@@ -204,6 +206,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             let config = crate::config::Config::load(&cwd)?;
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
             do_run(cwd, config, resolved_args, hostname, port).await?;
+        }
+
+        CliCommand::Inspect => {
+            let url = "https://_.localhost";
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open").arg(url).spawn().ok();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                std::process::Command::new("xdg-open").arg(url).spawn().ok();
+            }
+            println!("Opening {url}");
         }
     }
 
