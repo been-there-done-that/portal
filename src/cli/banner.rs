@@ -60,8 +60,8 @@ impl SetupPrinter {
             let version = env!("CARGO_PKG_VERSION");
             let badge = style(" portal ").bold().white().on_blue();
             let label = style(format!("v{version}  ·  first run")).dim();
-            eprintln!("  {badge}  {label}");
-            eprintln!();
+            let _ = self.mp.println(format!("  {badge}  {label}"));
+            let _ = self.mp.println("");
         }
     }
 
@@ -72,16 +72,16 @@ impl SetupPrinter {
     /// // ... run async work ...
     /// pb.finish_with_message(format!("{} daemon  started", console::style("✓").green()));
     /// ```
-    pub fn begin_step(&mut self, _name: &str, msg: &str) -> ProgressBar {
+    pub fn begin_step(&mut self, name: &str, msg: &str) -> ProgressBar {
         self.ensure_header();
         let pb = self.mp.add(ProgressBar::new_spinner());
         let spinner_style = ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-            .unwrap()
+            .expect("invalid spinner template")
             .tick_strings(&[
                 "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
             ]);
         pb.set_style(spinner_style);
-        pb.set_message(msg.to_string());
+        pb.set_message(format!("{:<8} {}", name, msg));
         pb.enable_steady_tick(std::time::Duration::from_millis(80));
         pb
     }
