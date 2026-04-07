@@ -516,4 +516,17 @@ mod tests {
         assert!(hostname.contains("myapp"));
         assert!(hostname.contains("localhost"));
     }
+
+    #[test]
+    fn detects_bun_from_text_lock() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("bun.lock"), "").unwrap();
+        assert_eq!(detect_package_manager(temp.path()), "bun");
+    }
+
+    #[test]
+    fn pick_dev_script_empty_scripts() {
+        let json = serde_json::json!({ "scripts": {} });
+        assert_eq!(pick_dev_script(&json), None);
+    }
 }
