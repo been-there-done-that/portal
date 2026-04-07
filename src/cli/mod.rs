@@ -443,18 +443,22 @@ async fn ensure_cert_trusted(setup: &mut banner::SetupPrinter) -> Result<()> {
         return Ok(());
     }
 
-    let trust_pb = setup.begin_step("trust", "installing CA certificate…  (sudo required)");
+    // Use plain_step (no spinner) — sudo needs raw TTY access, same as daemon start.
+    setup.plain_step("trust    installing CA certificate…  (sudo required)");
 
     let exe = std::env::current_exe()?;
     let status = tokio::process::Command::new("sudo")
         .arg(&exe)
         .arg("cert")
         .arg("install")
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .status()
         .await?;
 
     if !status.success() {
-        trust_pb.abandon_with_message(format!(
+        setup.plain_step(&format!(
             "{} trust   failed  (run `sudo portal cert install` manually)",
             console::style("✗").red()
         ));
@@ -464,7 +468,7 @@ async fn ensure_cert_trusted(setup: &mut banner::SetupPrinter) -> Result<()> {
         ));
     }
 
-    trust_pb.finish_with_message(format!(
+    setup.plain_step(&format!(
         "{} trust   installed  (sudo)",
         console::style("✓").green()
     ));
