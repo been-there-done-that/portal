@@ -382,12 +382,8 @@ mod tests {
     }
 
     #[test]
-    fn is_ca_trusted_false_for_unknown_cert() {
-        // The CA must not be trusted in the base test environment
-        // (CI machines have no portal CA). If it happens to be trusted
-        // on a dev machine this test is #[ignore]-ed.
-        // We just call is_ca_trusted() and do not assert the return value,
-        // since the function should never panic.
-        let _ = is_ca_trusted();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn is_ca_trusted_always_false_on_unsupported_platform() {
+        assert!(!is_ca_trusted(), "unsupported platforms must always return false");
     }
 }

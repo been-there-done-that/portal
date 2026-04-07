@@ -1,7 +1,7 @@
 //! E2E framework tests — run with: cargo test --test frameworks_test -- --ignored
 
-use portless::ports::find_free_port;
-use portless::process::spawn_child;
+use portal::ports::find_free_port;
+use portal::process::spawn_child;
 use std::time::Duration;
 use tokio::time::sleep;
 
