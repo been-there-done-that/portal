@@ -91,8 +91,10 @@ pub fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
 pub async fn handle_https_request(
     req: Request<Incoming>,
     routes: crate::routes::RouteStore,
+    inspector: Option<crate::inspector::InspectorSender>,
 ) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
-    // 1. Check hop counter
+    let start = std::time::Instant::now();
+
     let hops: u8 = req
         .headers()
         .get(HOP_HEADER)
@@ -100,50 +102,41 @@ pub async fn handle_https_request(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    // Extract hostname from Host header
     let hostname = req
         .headers()
         .get(http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
         .to_string();
 
-    // Strip port from hostname if present
-    let hostname = hostname.split(':').next().unwrap_or("").to_string();
-
     if hops >= MAX_HOPS {
-        let body = crate::pages::page_508(&hostname);
-        let resp = Response::builder()
+        return Ok(Response::builder()
             .status(StatusCode::LOOP_DETECTED)
             .header("content-type", "text/html")
-            .body(full_body(body))
-            .unwrap();
-        return Ok(resp);
+            .body(full_body(crate::pages::page_508(&hostname)))
+            .unwrap());
     }
 
-    // 3. Route lookup
     let route = match routes.get(&hostname) {
         Some(r) => r,
         None => {
-            let body = crate::pages::page_404(&hostname);
-            let resp = Response::builder()
+            return Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header("content-type", "text/html")
-                .body(full_body(body))
-                .unwrap();
-            return Ok(resp);
+                .body(full_body(crate::pages::page_404(&hostname)))
+                .unwrap());
         }
     };
 
-    // 4. WebSocket upgrade check
     if is_websocket_upgrade(&req) {
         return handle_websocket(req, route.port).await;
     }
 
-    // 5. Forward via hyper client
     let port = route.port;
-
-    // Build upstream URI
+    let method = req.method().to_string();
     let path_and_query = req
         .uri()
         .path_and_query()
@@ -151,56 +144,81 @@ pub async fn handle_https_request(
         .unwrap_or("/")
         .to_string();
 
-    let upstream_uri = format!("http://127.0.0.1:{}{}", port, path_and_query);
-
     let (mut parts, body) = req.into_parts();
 
-    // Update URI
-    parts.uri = match upstream_uri.parse() {
-        Ok(u) => u,
+    let req_headers: Vec<(String, String)> = parts
+        .headers
+        .iter()
+        .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+        .collect();
+
+    let req_body_bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
         Err(_) => {
-            let resp_body = crate::pages::page_502(&hostname);
-            let resp = Response::builder()
+            return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .header("content-type", "text/html")
-                .body(full_body(resp_body))
-                .unwrap();
-            return Ok(resp);
+                .body(full_body(crate::pages::page_502(&hostname)))
+                .unwrap());
         }
     };
 
-    // Increment hop header
-    let new_hops = hops + 1;
-    parts
-        .headers
-        .insert(HOP_HEADER, new_hops.to_string().parse().unwrap());
+    parts.uri = match format!("http://127.0.0.1:{}{}", port, path_and_query).parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("content-type", "text/html")
+                .body(full_body(crate::pages::page_502(&hostname)))
+                .unwrap());
+        }
+    };
+    parts.headers.insert(HOP_HEADER, (hops + 1).to_string().parse().unwrap());
+    parts.headers.insert("x-forwarded-proto", "https".parse().unwrap());
 
-    // Add X-Forwarded-Proto
-    parts
-        .headers
-        .insert("x-forwarded-proto", "https".parse().unwrap());
-
-    let upstream_req = Request::from_parts(parts, body);
-
-    let client: Client<HttpConnector, Incoming> =
+    let client: Client<HttpConnector, BoxBodyType> =
         Client::builder(TokioExecutor::new()).build_http();
+    let upstream_req = Request::from_parts(parts, full_body(req_body_bytes.clone()));
 
     match client.request(upstream_req).await {
         Ok(upstream_resp) => {
             let (resp_parts, resp_body) = upstream_resp.into_parts();
-            let boxed = resp_body.map_err(|e| e).boxed();
-            let resp = Response::from_parts(resp_parts, boxed);
-            Ok(resp)
+            let res_status = resp_parts.status.as_u16();
+
+            let res_headers: Vec<(String, String)> = resp_parts
+                .headers
+                .iter()
+                .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+                .collect();
+
+            let resp_bytes = match resp_body.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(_) => bytes::Bytes::new(),
+            };
+
+            if let Some(sender) = &inspector {
+                use crate::inspector::types::{CapturedBody, CapturedRequest};
+                sender.send(CapturedRequest {
+                    hostname: hostname.clone(),
+                    method,
+                    path: path_and_query,
+                    req_headers,
+                    req_body: CapturedBody::from_bytes(&req_body_bytes),
+                    res_status,
+                    res_headers,
+                    res_body: CapturedBody::from_bytes(&resp_bytes),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                });
+            }
+
+            Ok(Response::from_parts(resp_parts, full_body(resp_bytes)))
         }
-        Err(_) => {
-            let body = crate::pages::page_502(&hostname);
-            let resp = Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("content-type", "text/html")
-                .body(full_body(body))
-                .unwrap();
-            Ok(resp)
-        }
+        Err(_) => Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header("content-type", "text/html")
+            .body(full_body(crate::pages::page_502(&hostname)))
+            .unwrap()),
     }
 }
 
