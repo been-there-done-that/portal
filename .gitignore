@@ -1,2 +1,9 @@
+# Rust build artifacts
 /target/
+**/target/
+
+# Superpowers plugin cache
 /.superpowers/
+
+# OS
+.DS_Store
