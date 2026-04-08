@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod daemon;
 mod detect;
+mod detect_legacy;
 mod error;
 mod inspector;
 mod pages;
