@@ -94,11 +94,6 @@ pub fn extract_managed(content: &str) -> Vec<String> {
         .collect()
 }
 
-/// Read the hosts file. Returns empty string on failure.
-fn read_hosts() -> String {
-    std::fs::read_to_string(hosts_path()).unwrap_or_default()
-}
-
 /// Core sync logic — writes to `path` instead of the real hosts file.
 /// This separation allows tests to use a temp file.
 pub fn sync_hosts_file_at(hostnames: &[&str], path: &std::path::Path) -> crate::error::Result<()> {
@@ -126,7 +121,10 @@ pub fn sync_hosts_file_at(hostnames: &[&str], path: &std::path::Path) -> crate::
         let _ = std::fs::set_permissions(&tmp_path, perms);
     }
 
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path); // best-effort cleanup
+        return Err(e.into());
+    }
 
     Ok(())
 }
@@ -173,57 +171,23 @@ mod tests {
     }
 
     #[test]
-    fn should_sync_returns_false_for_zero() {
+    fn should_sync_env_var_opt_out() {
+        // Test each opt-out value sequentially to avoid parallel env var conflicts
         let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
-        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "0"); }
-        assert!(!should_sync());
-        match original {
-            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
-            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
-        }
-    }
 
-    #[test]
-    fn should_sync_returns_false_for_false() {
-        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
-        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "false"); }
-        assert!(!should_sync());
-        match original {
-            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
-            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+        for value in &["0", "false", "no", "off"] {
+            unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", value); }
+            assert!(!should_sync(), "expected false for PORTAL_SYNC_HOSTS={value}");
         }
-    }
 
-    #[test]
-    fn should_sync_returns_false_for_no() {
-        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
-        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "no"); }
-        assert!(!should_sync());
-        match original {
-            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
-            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
-        }
-    }
-
-    #[test]
-    fn should_sync_returns_false_for_off() {
-        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
-        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "off"); }
-        assert!(!should_sync());
-        match original {
-            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
-            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
-        }
-    }
-
-    #[test]
-    fn should_sync_returns_true_for_unset() {
-        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+        // Unset → true
         unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); }
         assert!(should_sync());
+
+        // Restore original state
         match original {
             Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
-            None => {},
+            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
         }
     }
 
