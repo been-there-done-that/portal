@@ -168,6 +168,46 @@ pub mod ruby;
 pub mod rust;
 pub mod php;
 
+// ─── PortalTomlDriver ────────────────────────────────────────────────────────
+
+pub struct PortalTomlDriver {
+    pub config: crate::config::ProjectConfig,
+}
+
+impl LanguageDriver for PortalTomlDriver {
+    fn detect(&self, _cwd: &Path) -> bool {
+        self.config.start_command.is_some()
+            || self.config.port_arg.is_some()
+            || self.config.port_position.is_some()
+    }
+    fn priority(&self) -> u8 { 255 }
+    fn name(&self) -> &'static str { "portal.toml" }
+    fn project_name(&self, _cwd: &Path) -> Option<String> {
+        self.config.name.clone()
+    }
+    fn start_command(&self, _cwd: &Path) -> Option<String> {
+        self.config.start_command.clone()
+    }
+    fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
+        // {port} in start_command → caller substitutes; no extra injection needed
+        if self.config.start_command.as_deref().map_or(false, |c| c.contains("{port}")) {
+            return PortInjection::EnvOnly;
+        }
+        if let Some(ref arg) = self.config.port_arg {
+            let mut args = vec![arg.clone(), port.to_string()];
+            if let Some(ref host_arg) = self.config.host_arg {
+                args.push(host_arg.clone());
+                args.push("0.0.0.0".to_string());
+            }
+            return PortInjection::CliArgs(args);
+        }
+        if self.config.port_position.as_deref() == Some("append") {
+            return PortInjection::AppendAddress(format!("0.0.0.0:{port}"));
+        }
+        PortInjection::EnvOnly
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -239,5 +279,74 @@ mod tests {
         assert_eq!(sanitize_hostname("feature/login"), "feature-login");
         assert_eq!(sanitize_hostname("api_v2"), "api-v2");
         assert_eq!(sanitize_hostname("UPPERCASE"), "uppercase");
+    }
+
+    #[test]
+    fn portal_toml_driver_detects_when_start_command_set() {
+        use crate::config::ProjectConfig;
+        let cfg = ProjectConfig {
+            name: None,
+            start_command: Some("uvicorn main:app".to_string()),
+            port_arg: None,
+            host_arg: None,
+            port_position: None,
+        };
+        let driver = PortalTomlDriver { config: cfg };
+        let tmp = TempDir::new().unwrap();
+        assert!(driver.detect(tmp.path()));
+    }
+
+    #[test]
+    fn portal_toml_driver_does_not_detect_when_only_name_set() {
+        use crate::config::ProjectConfig;
+        let cfg = ProjectConfig {
+            name: Some("myapp".to_string()),
+            start_command: None,
+            port_arg: None,
+            host_arg: None,
+            port_position: None,
+        };
+        let driver = PortalTomlDriver { config: cfg };
+        let tmp = TempDir::new().unwrap();
+        assert!(!driver.detect(tmp.path()));
+    }
+
+    #[test]
+    fn portal_toml_driver_port_arg_injection() {
+        use crate::config::ProjectConfig;
+        let cfg = ProjectConfig {
+            name: None,
+            start_command: Some("uvicorn main:app".to_string()),
+            port_arg: Some("--port".to_string()),
+            host_arg: Some("--host".to_string()),
+            port_position: None,
+        };
+        let driver = PortalTomlDriver { config: cfg };
+        let tmp = TempDir::new().unwrap();
+        let inj = driver.port_injection(tmp.path(), 4123);
+        match inj {
+            PortInjection::CliArgs(args) => {
+                assert!(args.contains(&"--port".to_string()));
+                assert!(args.contains(&"4123".to_string()));
+                assert!(args.contains(&"--host".to_string()));
+                assert!(args.contains(&"0.0.0.0".to_string()));
+            }
+            _ => panic!("expected CliArgs"),
+        }
+    }
+
+    #[test]
+    fn portal_toml_driver_port_in_command_returns_env_only() {
+        use crate::config::ProjectConfig;
+        let cfg = ProjectConfig {
+            name: None,
+            start_command: Some("php -S 0.0.0.0:{port}".to_string()),
+            port_arg: None,
+            host_arg: None,
+            port_position: None,
+        };
+        let driver = PortalTomlDriver { config: cfg };
+        let tmp = TempDir::new().unwrap();
+        assert!(matches!(driver.port_injection(tmp.path(), 4123), PortInjection::EnvOnly));
     }
 }

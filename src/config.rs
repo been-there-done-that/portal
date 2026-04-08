@@ -44,6 +44,11 @@ impl Default for DaemonConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: Option<String>,
+    pub start_command: Option<String>,
+    pub port_arg: Option<String>,
+    pub host_arg: Option<String>,
+    /// "append" → appends "0.0.0.0:{port}" as a positional arg
+    pub port_position: Option<String>,
 }
 
 /// Complete configuration
@@ -83,6 +88,10 @@ struct PartialDaemonConfig {
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct PartialProjectConfig {
     name: Option<String>,
+    start_command: Option<String>,
+    port_arg: Option<String>,
+    host_arg: Option<String>,
+    port_position: Option<String>,
 }
 
 impl Config {
@@ -162,6 +171,18 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
 
     if partial.project.name.is_some() {
         config.project.name = partial.project.name;
+    }
+    if partial.project.start_command.is_some() {
+        config.project.start_command = partial.project.start_command;
+    }
+    if partial.project.port_arg.is_some() {
+        config.project.port_arg = partial.project.port_arg;
+    }
+    if partial.project.host_arg.is_some() {
+        config.project.host_arg = partial.project.host_arg;
+    }
+    if partial.project.port_position.is_some() {
+        config.project.port_position = partial.project.port_position;
     }
 }
 
