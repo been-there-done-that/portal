@@ -5,6 +5,7 @@ mod daemon;
 mod detect;
 mod detect_legacy;
 mod error;
+mod hosts;
 mod inspector;
 mod pages;
 mod ports;
