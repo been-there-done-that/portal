@@ -70,8 +70,8 @@ pub async fn serve_http_redirect(listener: tokio::net::TcpListener, http_port: u
             };
 
             let response = format!(
-                "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\nX-Portal-Port: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                location, http_port
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\n{}: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                location, PORTAL_PORT_HEADER, http_port
             );
 
             let _ = stream.write_all(response.as_bytes()).await;
