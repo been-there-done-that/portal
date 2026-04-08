@@ -1,4 +1,5 @@
 pub mod banner;
+pub mod completion;
 pub mod output;
 
 use clap::{Parser, Subcommand};
