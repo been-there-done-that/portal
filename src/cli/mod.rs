@@ -22,13 +22,18 @@ pub enum CliCommand {
     /// Start the background daemon
     Daemon,
     /// Auto-detect and start the best dev script from package.json
-    Start,
+    Start {
+        #[arg(long, short = 'q', help = "Suppress startup banner and running output")]
+        quiet: bool,
+    },
     /// Run a dev server and assign it a .localhost URL
     Run {
         #[arg(long)]
         hostname: Option<String>,
         #[arg(long)]
         port: Option<u16>,
+        #[arg(long, short = 'q', help = "Suppress startup banner and running output")]
+        quiet: bool,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -82,7 +87,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             crate::daemon::start().await?;
         }
 
-        CliCommand::Start => {
+        CliCommand::Start { quiet } => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let registry = crate::detect::DriverRegistry::new(&config);
@@ -111,7 +116,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .map(String::from)
                 .collect();
 
-            do_run(cwd, config, args, hostname_override, None, true).await?;
+            do_run(cwd, config, args, hostname_override, None, true, quiet).await?;
         }
 
         CliCommand::Ls => {
@@ -222,12 +227,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Run {
             hostname,
             port,
+            quiet,
             args,
         } => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
-            do_run(cwd, config, resolved_args, hostname, port, false).await?;
+            do_run(cwd, config, resolved_args, hostname, port, false, quiet).await?;
         }
 
         CliCommand::Inspect => {
@@ -316,8 +322,13 @@ async fn do_run(
     hostname_override: Option<String>,
     port_override: Option<u16>,
     use_full_registry: bool,
+    quiet: bool,
 ) -> Result<()> {
-    let mut setup = banner::SetupPrinter::new();
+    let mut setup = if quiet {
+        banner::SetupPrinter::quiet()
+    } else {
+        banner::SetupPrinter::new()
+    };
     ensure_daemon_running(&config, &mut setup).await?;
     ensure_cert_trusted(&mut setup).await?;
     setup.done();
@@ -423,7 +434,9 @@ async fn do_run(
             .unwrap_or(crate::proto::Response::ok_empty());
     }
 
-    banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
+    if !quiet {
+        banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
+    }
 
     // Wait for child to exit, or intercept Ctrl+C to stop it gracefully.
     tokio::select! {

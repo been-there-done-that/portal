@@ -43,6 +43,7 @@ pub fn print_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
 pub struct SetupPrinter {
     mp: MultiProgress,
     started: bool,
+    quiet: bool,
 }
 
 impl SetupPrinter {
@@ -50,11 +51,21 @@ impl SetupPrinter {
         Self {
             mp: MultiProgress::new(),
             started: false,
+            quiet: false,
         }
     }
 
-    /// Print the header line once, on the first step.
+    /// A no-op printer — all methods silently succeed.
+    pub fn quiet() -> Self {
+        Self {
+            mp: MultiProgress::new(),
+            started: false,
+            quiet: true,
+        }
+    }
+
     fn ensure_header(&mut self) {
+        if self.quiet { return; }
         if !self.started {
             self.started = true;
             let version = env!("CARGO_PKG_VERSION");
@@ -65,14 +76,10 @@ impl SetupPrinter {
         }
     }
 
-    /// Add an animated spinner for a setup step. Returns a handle to finish it.
-    ///
-    /// ```rust
-    /// let pb = setup.begin_step("daemon", "starting…");
-    /// // ... run async work ...
-    /// pb.finish_with_message(format!("{} daemon  started", console::style("✓").green()));
-    /// ```
     pub fn begin_step(&mut self, name: &str, msg: &str) -> ProgressBar {
+        if self.quiet {
+            return ProgressBar::hidden();
+        }
         self.ensure_header();
         let pb = self.mp.add(ProgressBar::new_spinner());
         let spinner_style = ProgressStyle::with_template("  {spinner:.cyan} {msg}")
@@ -86,10 +93,8 @@ impl SetupPrinter {
         pb
     }
 
-    /// Print a plain (non-animated) step line into the setup block.
-    /// Use instead of `begin_step` when spinners would interfere with a
-    /// sub-process that needs raw terminal access (e.g. `sudo` password prompts).
     pub fn plain_step(&mut self, msg: &str) {
+        if self.quiet { return; }
         self.ensure_header();
         eprintln!("  {}", console::style(msg).dim());
     }
@@ -97,6 +102,7 @@ impl SetupPrinter {
     /// Print the `╰─ ready` footer and clear the MultiProgress.
     /// No-op if no steps were started (nothing to display).
     pub fn done(self) {
+        if self.quiet { return; }
         if self.started {
             eprintln!("  {}", style("╰─ ready").dim());
             eprintln!();
@@ -105,7 +111,19 @@ impl SetupPrinter {
 }
 
 impl Default for SetupPrinter {
-    fn default() -> Self {
-        Self::new()
+    fn default() -> Self { Self::new() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_setup_printer_does_not_panic() {
+        // A quiet SetupPrinter should be a no-op — just verify it doesn't panic
+        let mut setup = SetupPrinter::quiet();
+        setup.plain_step("this should be silent");
+        let _pb = setup.begin_step("daemon", "starting…");
+        setup.done(); // should not print anything
     }
 }
