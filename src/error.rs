@@ -32,7 +32,7 @@ pub enum Error {
     #[error("IPC error: {0}")]
     Ipc(String),
 
-    #[error("invalid port: {0}")]
+    #[error("Invalid port: {0}")]
     InvalidPort(String),
 }
 
