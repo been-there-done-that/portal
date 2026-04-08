@@ -51,6 +51,8 @@ pub enum CliCommand {
     Shutdown,
     /// Open the request inspector in the browser
     Inspect,
+    /// Generate portal.toml for this project
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -211,6 +213,67 @@ pub async fn run(cli: Cli) -> Result<()> {
                 std::process::Command::new("xdg-open").arg(url).spawn().ok();
             }
             println!("Opening {url}");
+        }
+
+        CliCommand::Init => {
+            let cwd = std::env::current_dir()?;
+
+            if cwd.join("portal.toml").exists() {
+                eprintln!("portal.toml already exists. Remove it first to reinitialise.");
+                std::process::exit(1);
+            }
+
+            let config = crate::config::Config::load(&cwd)?;
+            let registry = crate::detect::DriverRegistry::new(&config);
+            let detected = registry.detect_language(&cwd);
+
+            use std::io::IsTerminal;
+            let is_tty = std::io::stdin().is_terminal();
+
+            let (start_command, port_arg, host_arg, port_position, name) =
+                if let Some(driver) = detected {
+                    let raw_cmd = driver.start_command(&cwd).unwrap_or_default();
+                    let proj_name = driver.project_name(&cwd)
+                        .unwrap_or_else(|| {
+                            cwd.file_name()
+                                .and_then(|n| n.to_str())
+                                .map(crate::detect::sanitize_hostname)
+                                .unwrap_or_else(|| "app".to_string())
+                        });
+
+                    if is_tty {
+                        println!("\n  {} Detected  {}", console::style("✓").green(), driver.name());
+                        println!("  {} command   {}", console::style(" ").dim(), raw_cmd);
+                        println!("  {} name      {}\n", console::style(" ").dim(), proj_name);
+
+                        let confirmed: bool = dialoguer::Confirm::new()
+                            .with_prompt("Does this look right?")
+                            .default(true)
+                            .interact()
+                            .unwrap_or(true);
+
+                        if confirmed {
+                            let (pa, ha, pp) = injection_toml_fields(&driver.port_injection(&cwd, 0));
+                            (raw_cmd, pa, ha, pp, Some(proj_name))
+                        } else {
+                            prompt_manual_config()?
+                        }
+                    } else {
+                        let (pa, ha, pp) = injection_toml_fields(&driver.port_injection(&cwd, 0));
+                        (raw_cmd, pa, ha, pp, Some(proj_name))
+                    }
+                } else if is_tty {
+                    prompt_manual_config()?
+                } else {
+                    write_placeholder_toml(&cwd)?;
+                    println!("portal.toml created with placeholder. Edit it to configure your project.");
+                    return Ok(());
+                };
+
+            write_portal_toml(&cwd, &name, &start_command, &port_arg, &host_arg, &port_position)?;
+            println!("{} portal.toml created", console::style("✓").green());
+            println!("  Run: portal run {}",
+                start_command.split_whitespace().next().unwrap_or("your-server"));
         }
     }
 
@@ -726,6 +789,102 @@ async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()>
         console::style("!").yellow(),
         ports
     );
+    Ok(())
+}
+
+// ─── portal init helpers ─────────────────────────────────────────────────────
+
+fn injection_toml_fields(
+    injection: &crate::detect::PortInjection,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match injection {
+        crate::detect::PortInjection::EnvOnly => (None, None, None),
+        crate::detect::PortInjection::CliArgs(args) => {
+            let port_flag = args.windows(2)
+                .find(|w| w[1] == "0")
+                .map(|w| w[0].clone());
+            let host_flag = args.windows(2)
+                .find(|w| w[1] == "0.0.0.0")
+                .map(|w| w[0].clone());
+            (port_flag, host_flag, None)
+        }
+        crate::detect::PortInjection::AppendAddress(_) => {
+            (None, None, Some("append".to_string()))
+        }
+    }
+}
+
+fn prompt_manual_config() -> crate::error::Result<
+    (String, Option<String>, Option<String>, Option<String>, Option<String>)
+> {
+    let cmd: String = dialoguer::Input::new()
+        .with_prompt("What command starts your dev server?")
+        .interact_text()
+        .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
+
+    let choices = &[
+        "FLAG   --port 4123",
+        "FLAG   -p 4123",
+        "APPEND 0.0.0.0:4123 (positional)",
+        "ENV    PORT=4123 only",
+        "CUSTOM I'll write the full command with {port}",
+    ];
+    let choice = dialoguer::Select::new()
+        .with_prompt("How does it accept a port?")
+        .items(choices)
+        .default(0)
+        .interact()
+        .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
+
+    let (pa, ha, pp) = match choice {
+        0 => (Some("--port".to_string()), None, None),
+        1 => (Some("-p".to_string()),     None, None),
+        2 => (None, None, Some("append".to_string())),
+        3 => (None, None, None),
+        _ => (None, None, None),
+    };
+
+    Ok((cmd, pa, ha, pp, None))
+}
+
+fn write_portal_toml(
+    cwd: &std::path::Path,
+    name: &Option<String>,
+    start_command: &str,
+    port_arg: &Option<String>,
+    host_arg: &Option<String>,
+    port_position: &Option<String>,
+) -> crate::error::Result<()> {
+    let mut lines = vec!["[project]".to_string()];
+    if let Some(n) = name {
+        lines.push(format!("name = {n:?}"));
+    }
+    if !start_command.is_empty() {
+        lines.push(format!("start_command = {start_command:?}"));
+    }
+    if let Some(pa) = port_arg {
+        lines.push(format!("port_arg = {pa:?}"));
+    }
+    if let Some(ha) = host_arg {
+        lines.push(format!("host_arg = {ha:?}"));
+    }
+    if let Some(pp) = port_position {
+        lines.push(format!("port_position = {pp:?}"));
+    }
+    let content = lines.join("\n") + "\n";
+    std::fs::write(cwd.join("portal.toml"), content)?;
+    Ok(())
+}
+
+fn write_placeholder_toml(cwd: &std::path::Path) -> crate::error::Result<()> {
+    let content = r#"[project]
+# name = "myapp"
+# start_command = "your-dev-command"
+# port_arg = "--port"
+# host_arg = "--host"
+# See: https://github.com/been-there-done-that/portal
+"#;
+    std::fs::write(cwd.join("portal.toml"), content)?;
     Ok(())
 }
 
