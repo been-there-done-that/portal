@@ -172,6 +172,8 @@ pub async fn handle_https_request(
     };
 
     if is_websocket_upgrade(&req) {
+        // WebSocket upgrade errors are always plain-text — they bypass the accept_html branch
+        // because WebSocket clients never send Accept: text/html
         return handle_websocket(req, route.port).await;
     }
 

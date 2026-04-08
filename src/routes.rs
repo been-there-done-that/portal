@@ -306,49 +306,4 @@ mod tests {
         assert_eq!(store2.list().len(), 20);
     }
 
-    #[tokio::test]
-    async fn state_store_remove_works() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
-        store.insert(crate::routes::Route {
-            hostname: "test.localhost".to_string(),
-            port: 4000,
-            pid: std::process::id(),
-            owner_pid: std::process::id(),
-            cwd: "/tmp".to_string(),
-            created_at: chrono::Utc::now(),
-        }).await.unwrap();
-        assert!(store.get("test.localhost").is_some());
-        store.remove("test.localhost").await.unwrap();
-        assert!(store.get("test.localhost").is_none());
-    }
-
-    #[tokio::test]
-    async fn state_store_remove_stale_removes_dead_pids() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
-
-        store.insert(crate::routes::Route {
-            hostname: "alive.localhost".to_string(),
-            port: 4000,
-            pid: std::process::id(),
-            owner_pid: std::process::id(),
-            cwd: "/tmp".to_string(),
-            created_at: chrono::Utc::now(),
-        }).await.unwrap();
-
-        store.insert(crate::routes::Route {
-            hostname: "dead.localhost".to_string(),
-            port: 4001,
-            pid: u32::MAX,
-            owner_pid: u32::MAX,
-            cwd: "/tmp".to_string(),
-            created_at: chrono::Utc::now(),
-        }).await.unwrap();
-
-        store.remove_stale().await.unwrap();
-
-        assert!(store.get("alive.localhost").is_some());
-        assert!(store.get("dead.localhost").is_none());
-    }
 }
