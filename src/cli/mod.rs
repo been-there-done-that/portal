@@ -383,9 +383,27 @@ async fn do_run(
             .unwrap_or(crate::detect::PortInjection::EnvOnly)
     };
 
+    // Build env vars for the child process
+    let port_env_name = config.project.port_env.as_deref().unwrap_or("PORT");
+    let mut extra_env: Vec<(String, String)> = vec![
+        (port_env_name.to_string(), port.to_string()),
+        ("PORTAL_URL".to_string(), format!("https://{hostname}")),
+    ];
+    // Inject NODE_EXTRA_CA_CERTS so Node.js child processes trust our local CA
+    if config.proxy.https {
+        let ca_path = crate::config::dirs_for_state().join("ca.pem");
+        if ca_path.exists() {
+            extra_env.push((
+                "NODE_EXTRA_CA_CERTS".to_string(),
+                ca_path.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+
     let my_pid = std::process::id();
-    let extra_env: Vec<(String, String)> = vec![]; // placeholder — filled in Task 2
-    let mut child = crate::process::spawn_child(&cwd, &args, port, injection, &extra_env).await?;
+    let mut child = crate::process::spawn_child(
+        &cwd, &args, port, injection, &extra_env,
+    ).await?;
 
     // Register the route in the daemon's live in-memory store via IPC
     let child_pid = child.id().unwrap_or(my_pid);

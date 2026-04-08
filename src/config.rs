@@ -452,4 +452,11 @@ port_env = "APP_PORT"
         let config = Config::load_with_paths(None, Some(project_path), &[]).unwrap();
         assert_eq!(config.project.port_env, Some("APP_PORT".to_string()));
     }
+
+    #[test]
+    fn port_env_defaults_to_port_when_unset() {
+        let config = Config::load_with_paths(None, None, &[]).unwrap();
+        // When None, caller should default to "PORT"
+        assert_eq!(config.project.port_env.as_deref().unwrap_or("PORT"), "PORT");
+    }
 }
