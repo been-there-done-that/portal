@@ -41,6 +41,7 @@ impl DriverRegistry {
                 Box::new(php::PhpDriver),
                 Box::new(go::GoDriver),
                 Box::new(rust::RustDriver),
+                Box::new(storybook::StorybookDriver),
                 Box::new(node::NodeDriver),
             ],
         };
@@ -385,6 +386,30 @@ mod tests {
         let cfg = crate::config::Config::default();
         let reg = DriverRegistry::new(&cfg);
         assert!(reg.detect(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn registry_storybook_beats_node_for_storybook_project() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"ui","scripts":{"dev":"vite","storybook":"storybook dev"}}"#,
+        ).unwrap();
+        fs::create_dir(tmp.path().join(".storybook")).unwrap();
+        let cfg = crate::config::Config::default();
+        let reg = DriverRegistry::new(&cfg);
+        assert_eq!(reg.detect(tmp.path()).unwrap().name(), "Storybook");
+    }
+
+    #[test]
+    fn registry_storybook_project_name_has_storybook_suffix() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("package.json"), r#"{"name":"my-ui"}"#).unwrap();
+        fs::create_dir(tmp.path().join(".storybook")).unwrap();
+        let cfg = crate::config::Config::default();
+        let reg = DriverRegistry::new(&cfg);
+        let driver = reg.detect(tmp.path()).unwrap();
+        assert_eq!(driver.project_name(tmp.path()), Some("my-ui-storybook".to_string()));
     }
 
     #[test]
