@@ -195,7 +195,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             let mut stream = ipc_connect().await?;
             write_frame(&mut stream, &cmd).await?;
-            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            let resp = read_frame(&mut stream).await?;
             if is_sync {
                 output::print_hosts_sync(&resp);
             } else {

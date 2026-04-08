@@ -153,7 +153,7 @@ pub fn print_hosts_sync(resp: &crate::proto::Response) {
             "error: {}",
             resp.error.as_deref().unwrap_or("unknown error")
         );
-        return;
+        std::process::exit(1);
     }
     match &resp.data {
         Some(serde_json::Value::Array(entries)) if !entries.is_empty() => {
@@ -174,7 +174,7 @@ pub fn print_hosts_clean(resp: &crate::proto::Response) {
             "error: {}",
             resp.error.as_deref().unwrap_or("unknown error")
         );
-        return;
+        std::process::exit(1);
     }
     println!("hosts file cleaned");
 }
