@@ -27,8 +27,9 @@ async fn restart_on_same_port_no_eaddrinuse() {
             script_file.clone(),
         ];
         let mut child = spawn_child(
-            Path::new("/tmp"), &args, port, "test.localhost",
+            Path::new("/tmp"), &args, port,
             PortInjection::EnvOnly,
+            &[],
         ).await.unwrap();
 
         // Poll until the port is actually bound (python3 startup can be slow).

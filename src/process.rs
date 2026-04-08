@@ -2,14 +2,14 @@ use crate::error::Result;
 use std::path::Path;
 
 /// Spawn a child dev server process.
-/// Sets PORT=<port> and PORTAL_URL=https://<hostname> env vars.
+/// Callers provide `extra_env` — all env vars to set (PORT, PORTAL_URL, NODE_EXTRA_CA_CERTS, etc.).
 /// Handles PortInjection variants for framework-specific port passing.
 pub async fn spawn_child(
     cwd: &Path,
     args: &[String],
     port: u16,
-    hostname: &str,
     injection: crate::detect::PortInjection,
+    extra_env: &[(String, String)],
 ) -> Result<tokio::process::Child> {
     if args.is_empty() {
         return Err(crate::error::Error::Ipc("No arguments provided to spawn_child".to_string()));
@@ -27,11 +27,12 @@ pub async fn spawn_child(
 
     let mut cmd = tokio::process::Command::new(program);
     #[cfg(unix)]
-    cmd.process_group(0); // child gets its own process group (pgid = child pid)
-    cmd.env("PORT", &port_str)
-        .env("PORTAL_URL", format!("https://{hostname}"))
-        .current_dir(cwd)
-        .kill_on_drop(false);
+    cmd.process_group(0);
+    cmd.current_dir(cwd).kill_on_drop(false);
+
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
 
     match injection {
         crate::detect::PortInjection::EnvOnly => {
@@ -96,8 +97,8 @@ mod tests {
         #[cfg(unix)]
         {
             let args = vec!["sleep".to_string(), "60".to_string()];
-            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost",
-                crate::detect::PortInjection::EnvOnly)
+            let mut child = spawn_child(Path::new("/tmp"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly, &[])
                 .await
                 .expect("Failed to spawn child");
 
@@ -122,8 +123,8 @@ mod tests {
         #[cfg(windows)]
         {
             let args = vec!["timeout".to_string(), "/T".to_string(), "60".to_string()];
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost",
-                crate::detect::PortInjection::EnvOnly)
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly, &[])
                 .await
                 .expect("Failed to spawn child");
 
@@ -156,8 +157,9 @@ mod tests {
                 format!("echo $PORT > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost",
-                crate::detect::PortInjection::EnvOnly)
+            let extra_env = vec![("PORT".to_string(), "4321".to_string())];
+            let mut child = spawn_child(Path::new("/tmp"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly, &extra_env)
                 .await
                 .expect("Failed to spawn child");
 
@@ -190,8 +192,9 @@ mod tests {
                 format!("echo %PORT% > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost",
-                crate::detect::PortInjection::EnvOnly)
+            let extra_env = vec![("PORT".to_string(), "4321".to_string())];
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly, &extra_env)
                 .await
                 .expect("Failed to spawn child");
 
@@ -226,12 +229,13 @@ mod tests {
                 format!("echo $PORTAL_URL > {}", test_file),
             ];
 
+            let extra_env = vec![("PORTAL_URL".to_string(), "https://myapp.localhost".to_string())];
             let mut child = spawn_child(
                 Path::new("/tmp"),
                 &args,
                 4321,
-                "myapp.localhost",
                 crate::detect::PortInjection::EnvOnly,
+                &extra_env,
             )
             .await
             .expect("Failed to spawn child");
@@ -258,8 +262,9 @@ mod tests {
                 format!("echo %PORTAL_URL% > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "myapp.localhost",
-                crate::detect::PortInjection::EnvOnly)
+            let extra_env = vec![("PORTAL_URL".to_string(), "https://myapp.localhost".to_string())];
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly, &extra_env)
                 .await
                 .expect("Failed to spawn child");
 
@@ -285,9 +290,11 @@ mod tests {
             let test_file = format!("/tmp/portal_port_test_{random_id}.txt");
             let args = vec!["sh".to_string(), "-c".to_string(),
                 format!("echo $PORT > {test_file}")];
+            let extra_env = vec![("PORT".to_string(), "4321".to_string())];
             let mut child = spawn_child(
-                Path::new("/tmp"), &args, 4321, "test.localhost",
+                Path::new("/tmp"), &args, 4321,
                 crate::detect::PortInjection::EnvOnly,
+                &extra_env,
             ).await.unwrap();
             let _ = child.wait().await;
             let content = std::fs::read_to_string(&test_file).unwrap();
@@ -309,7 +316,7 @@ mod tests {
                 vec!["--port".to_string(), "4321".to_string()]
             );
             let mut child = spawn_child(
-                Path::new("/tmp"), &args, 4321, "test.localhost", injection,
+                Path::new("/tmp"), &args, 4321, injection, &[],
             ).await.unwrap();
             let _ = child.wait().await;
             let content = std::fs::read_to_string(&test_file).unwrap();
@@ -332,8 +339,9 @@ mod tests {
                 format!("ps -o pgid= -p $$ | tr -d ' ' > {pgid_file}"),
             ];
             let mut child = spawn_child(
-                Path::new("/tmp"), &args, 4321, "test.localhost",
+                Path::new("/tmp"), &args, 4321,
                 crate::detect::PortInjection::EnvOnly,
+                &[],
             ).await.unwrap();
             let _ = child.wait().await;
 
@@ -365,8 +373,9 @@ mod tests {
                 format!("sleep 300 & echo $! > {pid_file}; wait"),
             ];
             let mut child = spawn_child(
-                Path::new("/tmp"), &args, 4321, "test.localhost",
+                Path::new("/tmp"), &args, 4321,
                 crate::detect::PortInjection::EnvOnly,
+                &[],
             ).await.unwrap();
 
             // Wait for grandchild to start and write its PID
@@ -407,11 +416,62 @@ mod tests {
             ];
             let injection = crate::detect::PortInjection::AppendAddress("0.0.0.0:4321".to_string());
             let mut child = spawn_child(
-                Path::new("/tmp"), &args, 4321, "test.localhost", injection,
+                Path::new("/tmp"), &args, 4321, injection, &[],
             ).await.unwrap();
             let _ = child.wait().await;
             let content = std::fs::read_to_string(&test_file).unwrap();
             assert!(content.contains("0.0.0.0:4321"), "expected address in '{content}'");
+            let _ = std::fs::remove_file(&test_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_env_vars_are_passed_to_child() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let random_id = rand::thread_rng().gen::<u32>();
+            let test_file = format!("/tmp/portal_extra_env_{random_id}.txt");
+            let args = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("echo $MY_CUSTOM_VAR > {test_file}"),
+            ];
+            let extra_env = vec![
+                ("MY_CUSTOM_VAR".to_string(), "hello123".to_string()),
+            ];
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly,
+                &extra_env,
+            ).await.expect("spawn failed");
+            let _ = child.wait().await;
+            let content = std::fs::read_to_string(&test_file).unwrap();
+            assert_eq!(content.trim(), "hello123");
+            let _ = std::fs::remove_file(&test_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn port_env_not_set_when_not_in_extra_env() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let random_id = rand::thread_rng().gen::<u32>();
+            let test_file = format!("/tmp/portal_no_port_{random_id}.txt");
+            let args = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("echo \"$PORT\" > {test_file}"),
+            ];
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321,
+                crate::detect::PortInjection::EnvOnly,
+                &[],
+            ).await.expect("spawn failed");
+            let _ = child.wait().await;
+            let content = std::fs::read_to_string(&test_file).unwrap();
+            assert_eq!(content.trim(), "", "PORT should not be set automatically; got: {content}");
             let _ = std::fs::remove_file(&test_file);
         }
     }

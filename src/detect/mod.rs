@@ -301,6 +301,7 @@ mod tests {
             port_arg: None,
             host_arg: None,
             port_position: None,
+            port_env: None,
         };
         let driver = PortalTomlDriver { config: cfg };
         let tmp = TempDir::new().unwrap();
@@ -316,6 +317,7 @@ mod tests {
             port_arg: None,
             host_arg: None,
             port_position: None,
+            port_env: None,
         };
         let driver = PortalTomlDriver { config: cfg };
         let tmp = TempDir::new().unwrap();
@@ -331,6 +333,7 @@ mod tests {
             port_arg: Some("--port".to_string()),
             host_arg: Some("--host".to_string()),
             port_position: None,
+            port_env: None,
         };
         let driver = PortalTomlDriver { config: cfg };
         let tmp = TempDir::new().unwrap();
@@ -392,6 +395,7 @@ mod tests {
             port_arg: None,
             host_arg: None,
             port_position: None,
+            port_env: None,
         };
         let driver = PortalTomlDriver { config: cfg };
         let tmp = TempDir::new().unwrap();

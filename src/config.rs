@@ -49,6 +49,8 @@ pub struct ProjectConfig {
     pub host_arg: Option<String>,
     /// "append" → appends "0.0.0.0:{port}" as a positional arg
     pub port_position: Option<String>,
+    /// Name of the env var to use for passing the port (e.g. "APP_PORT")
+    pub port_env: Option<String>,
 }
 
 /// Complete configuration
@@ -92,6 +94,7 @@ struct PartialProjectConfig {
     port_arg: Option<String>,
     host_arg: Option<String>,
     port_position: Option<String>,
+    port_env: Option<String>,
 }
 
 impl Config {
@@ -183,6 +186,9 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     }
     if partial.project.port_position.is_some() {
         config.project.port_position = partial.project.port_position;
+    }
+    if partial.project.port_env.is_some() {
+        config.project.port_env = partial.project.port_env;
     }
 }
 
@@ -423,5 +429,17 @@ tld = "test"
         let env_overrides = [("PORTAL_HTTP_PORT", "not_a_number")];
         let result = Config::load_with_paths(None, None, &env_overrides);
         assert!(result.is_err(), "expected error for invalid port value");
+    }
+
+    #[test]
+    fn port_env_can_be_overridden_via_toml() {
+        let temp = TempDir::new().unwrap();
+        let project_path = temp.path().join("portal.toml");
+        std::fs::write(&project_path, r#"
+[project]
+port_env = "APP_PORT"
+"#).unwrap();
+        let config = Config::load_with_paths(None, Some(project_path), &[]).unwrap();
+        assert_eq!(config.project.port_env, Some("APP_PORT".to_string()));
     }
 }
