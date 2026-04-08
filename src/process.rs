@@ -1,40 +1,49 @@
 use crate::error::Result;
 use std::path::Path;
-use tokio::process::Command;
 
 /// Spawn a child dev server process.
 /// Sets PORT=<port> and PORTAL_URL=https://<hostname> env vars.
-/// Calls extra_args_for_port to inject framework flags.
+/// Handles PortInjection variants for framework-specific port passing.
 pub async fn spawn_child(
     cwd: &Path,
     args: &[String],
     port: u16,
     hostname: &str,
+    injection: crate::detect::PortInjection,
 ) -> Result<tokio::process::Child> {
     if args.is_empty() {
-        return Err(crate::error::Error::Ipc(
-            "No arguments provided to spawn_child".to_string(),
-        ));
+        return Err(crate::error::Error::Ipc("No arguments provided to spawn_child".to_string()));
     }
 
-    // Split args into program and rest
+    let port_str = port.to_string();
+
+    // Substitute {port} in every arg
+    let args: Vec<String> = args.iter()
+        .map(|a| a.replace("{port}", &port_str))
+        .collect();
+
     let program = &args[0];
-    let rest_args: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
 
-    // Get extra args for this framework
-    let extra = crate::detect::extra_args_for_port(cwd, &rest_args, port)?;
-
-    // Spawn the child process
-    let mut cmd = Command::new(program);
-    cmd.args(&rest_args)
-        .args(&extra)
-        .env("PORT", port.to_string())
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.env("PORT", &port_str)
         .env("PORTAL_URL", format!("https://{hostname}"))
         .current_dir(cwd)
         .kill_on_drop(false);
 
-    let child = cmd.spawn()?;
-    Ok(child)
+    match injection {
+        crate::detect::PortInjection::EnvOnly => {
+            cmd.args(&rest);
+        }
+        crate::detect::PortInjection::CliArgs(ref extra) => {
+            cmd.args(&rest).args(extra);
+        }
+        crate::detect::PortInjection::AppendAddress(ref addr) => {
+            cmd.args(&rest).arg(addr);
+        }
+    }
+
+    Ok(cmd.spawn()?)
 }
 
 /// Gracefully stop a child process: SIGTERM, wait 5s, SIGKILL.
@@ -85,7 +94,8 @@ mod tests {
         #[cfg(unix)]
         {
             let args = vec!["sleep".to_string(), "60".to_string()];
-            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost")
+            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly)
                 .await
                 .expect("Failed to spawn child");
 
@@ -110,7 +120,8 @@ mod tests {
         #[cfg(windows)]
         {
             let args = vec!["timeout".to_string(), "/T".to_string(), "60".to_string()];
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost")
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly)
                 .await
                 .expect("Failed to spawn child");
 
@@ -143,7 +154,8 @@ mod tests {
                 format!("echo $PORT > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost")
+            let mut child = spawn_child(Path::new("/tmp"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly)
                 .await
                 .expect("Failed to spawn child");
 
@@ -176,7 +188,8 @@ mod tests {
                 format!("echo %PORT% > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost")
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly)
                 .await
                 .expect("Failed to spawn child");
 
@@ -216,6 +229,7 @@ mod tests {
                 &args,
                 4321,
                 "myapp.localhost",
+                crate::detect::PortInjection::EnvOnly,
             )
             .await
             .expect("Failed to spawn child");
@@ -242,7 +256,8 @@ mod tests {
                 format!("echo %PORTAL_URL% > {}", test_file),
             ];
 
-            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "myapp.localhost")
+            let mut child = spawn_child(Path::new("C:\\"), &args, 4321, "myapp.localhost",
+                crate::detect::PortInjection::EnvOnly)
                 .await
                 .expect("Failed to spawn child");
 
@@ -255,6 +270,71 @@ mod tests {
                 panic!("Failed to read test file");
             }
 
+            let _ = std::fs::remove_file(&test_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_child_env_only_sets_port_env() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let random_id = rand::thread_rng().gen::<u32>();
+            let test_file = format!("/tmp/portal_port_test_{random_id}.txt");
+            let args = vec!["sh".to_string(), "-c".to_string(),
+                format!("echo $PORT > {test_file}")];
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly,
+            ).await.unwrap();
+            let _ = child.wait().await;
+            let content = std::fs::read_to_string(&test_file).unwrap();
+            assert_eq!(content.trim(), "4321");
+            let _ = std::fs::remove_file(&test_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_child_cli_args_appended() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let random_id = rand::thread_rng().gen::<u32>();
+            let test_file = format!("/tmp/portal_args_test_{random_id}.txt");
+            let args = vec!["sh".to_string(), "-c".to_string(),
+                format!("echo \"$0 $@\" > {test_file}")];
+            let injection = crate::detect::PortInjection::CliArgs(
+                vec!["--port".to_string(), "4321".to_string()]
+            );
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321, "test.localhost", injection,
+            ).await.unwrap();
+            let _ = child.wait().await;
+            let content = std::fs::read_to_string(&test_file).unwrap();
+            assert!(content.contains("--port"), "expected --port in '{content}'");
+            let _ = std::fs::remove_file(&test_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_child_append_address_appended() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let random_id = rand::thread_rng().gen::<u32>();
+            let test_file = format!("/tmp/portal_addr_test_{random_id}.txt");
+            let args = vec![
+                "sh".to_string(), "-c".to_string(),
+                format!("echo \"$1\" > {test_file}"),
+                "sh".to_string(),
+            ];
+            let injection = crate::detect::PortInjection::AppendAddress("0.0.0.0:4321".to_string());
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321, "test.localhost", injection,
+            ).await.unwrap();
+            let _ = child.wait().await;
+            let content = std::fs::read_to_string(&test_file).unwrap();
+            assert!(content.contains("0.0.0.0:4321"), "expected address in '{content}'");
             let _ = std::fs::remove_file(&test_file);
         }
     }

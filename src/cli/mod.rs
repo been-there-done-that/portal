@@ -288,7 +288,8 @@ async fn do_run(
     };
 
     let my_pid = std::process::id();
-    let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname).await?;
+    let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname,
+        crate::detect::PortInjection::EnvOnly).await?;
 
     // Register the route in the daemon's live in-memory store via IPC
     let child_pid = child.id().unwrap_or(my_pid);

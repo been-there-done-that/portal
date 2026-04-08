@@ -25,7 +25,8 @@ async fn express_fixture_responds_via_port() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/express");
     let port = find_free_port(5000, 5999).unwrap();
     let args = vec!["node".to_string(), "server.js".to_string()];
-    let mut child = spawn_child(&fixture, &args, port, "test.localhost").await.unwrap();
+    let mut child = spawn_child(&fixture, &args, port, "test.localhost",
+        portal::detect::PortInjection::EnvOnly).await.unwrap();
 
     let ready = wait_for_port(port, Duration::from_secs(10)).await;
     assert!(ready, "express fixture did not start on port {port}");
