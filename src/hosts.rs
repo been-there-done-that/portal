@@ -1,7 +1,7 @@
 // src/hosts.rs
 
-const MARKER_START: &str = "# portless-start";
-const MARKER_END: &str = "# portless-end";
+pub(crate) const MARKER_START: &str = "# portless-start";
+pub(crate) const MARKER_END: &str = "# portless-end";
 
 /// Returns the path to the system hosts file.
 pub fn hosts_path() -> std::path::PathBuf {
@@ -20,11 +20,11 @@ pub fn hosts_path() -> std::path::PathBuf {
     }
 }
 
-/// Returns false only when PORTAL_SYNC_HOSTS is "0" or "false". True otherwise.
+/// Returns false only when PORTAL_SYNC_HOSTS is "0", "false", "no", or "off". True otherwise.
 pub fn should_sync() -> bool {
     !matches!(
         std::env::var("PORTAL_SYNC_HOSTS").as_deref(),
-        Ok("0") | Ok("false")
+        Ok("0") | Ok("false") | Ok("no") | Ok("off")
     )
 }
 
@@ -55,20 +55,30 @@ pub fn remove_block(content: &str) -> String {
     let before = &content[..s];
     let after = &content[e + MARKER_END.len()..];
     let combined = format!("{before}{after}");
-    // Collapse 3+ consecutive newlines to 2
-    let mut out = combined;
-    while out.contains("\n\n\n") {
-        out = out.replace("\n\n\n", "\n\n");
+    // Collapse 3+ consecutive blank lines to at most 1 blank line (2 newlines)
+    let mut out = String::new();
+    let mut blank_run = 0usize;
+    for line in combined.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run < 2 {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     let trimmed = out.trim_end();
     if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!("{trimmed}\n")
+        return String::new();
     }
+    format!("{trimmed}\n")
 }
 
 /// Extract lines from within the portless-managed block.
+/// Inner lines have leading/trailing whitespace trimmed.
 /// Returns empty vec if no managed block exists.
 pub fn extract_managed(content: &str) -> Vec<String> {
     let start_idx = content.find(MARKER_START);
@@ -100,9 +110,58 @@ mod tests {
     }
 
     #[test]
-    fn should_sync_default_true() {
-        // PORTAL_SYNC_HOSTS not set → true (assuming test env doesn't set it)
-        // We can't assert the env isn't set, so just test the "0" branch below.
+    fn should_sync_returns_false_for_zero() {
+        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "0"); }
+        assert!(!should_sync());
+        match original {
+            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
+            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+        }
+    }
+
+    #[test]
+    fn should_sync_returns_false_for_false() {
+        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "false"); }
+        assert!(!should_sync());
+        match original {
+            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
+            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+        }
+    }
+
+    #[test]
+    fn should_sync_returns_false_for_no() {
+        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "no"); }
+        assert!(!should_sync());
+        match original {
+            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
+            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+        }
+    }
+
+    #[test]
+    fn should_sync_returns_false_for_off() {
+        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+        unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", "off"); }
+        assert!(!should_sync());
+        match original {
+            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
+            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+        }
+    }
+
+    #[test]
+    fn should_sync_returns_true_for_unset() {
+        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+        unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); }
+        assert!(should_sync());
+        match original {
+            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
+            None => {},
+        }
     }
 
     #[test]
