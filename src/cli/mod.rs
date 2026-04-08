@@ -373,6 +373,7 @@ async fn do_run(
     //   2. Existing route      → stop old, reuse its port
     //   3. No existing route   → find a free port
     let port = if let Some(explicit_port) = port_override {
+        crate::ports::validate_app_port(explicit_port)?;
         if let Some(_old_port) = reuse_port {
             let mut s = ipc_connect().await?;
             write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
