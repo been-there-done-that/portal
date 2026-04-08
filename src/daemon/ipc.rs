@@ -114,6 +114,28 @@ async fn handle_connection(
     write_frame(&mut stream, &response).await.ok();
 }
 
+/// Collect hostnames of all user-registered routes (excludes internal `_.localhost`).
+fn user_hostnames(routes: &crate::routes::RouteStore) -> Vec<String> {
+    routes
+        .list()
+        .into_iter()
+        .filter(|r| r.hostname != "_.localhost")
+        .map(|r| r.hostname)
+        .collect()
+}
+
+/// Sync /etc/hosts with current user routes. Logs a warning on failure, never panics.
+fn sync_hosts(routes: &crate::routes::RouteStore) {
+    if !crate::hosts::should_sync() {
+        return;
+    }
+    let hostnames = user_hostnames(routes);
+    let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = crate::hosts::sync_hosts_file(&refs) {
+        tracing::warn!("hosts sync failed: {e}");
+    }
+}
+
 async fn dispatch(
     cmd: Command,
     routes: RouteStore,
@@ -126,6 +148,7 @@ async fn dispatch(
     match cmd {
         Command::Ls => {
             let _ = routes.remove_stale();
+            sync_hosts(&routes);
             let list: Vec<_> = routes
                 .list()
                 .into_iter()
@@ -161,6 +184,7 @@ async fn dispatch(
                         kill(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
                     let _ = routes.remove(&hostname);
+                    sync_hosts(&routes);
                     Response::ok_empty()
                 }
             }
@@ -168,6 +192,7 @@ async fn dispatch(
 
         Command::Rm { hostname } => {
             let _ = routes.remove(&hostname);
+            sync_hosts(&routes);
             Response::ok_empty()
         }
 
@@ -176,6 +201,9 @@ async fn dispatch(
             let pid = pid_path.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Err(e) = crate::hosts::clean_hosts_file() {
+                    tracing::warn!("hosts cleanup on shutdown failed: {e}");
+                }
                 let _ = std::fs::remove_file(&sock);
                 let _ = std::fs::remove_file(&pid);
                 std::process::exit(0);
@@ -220,18 +248,33 @@ async fn dispatch(
                 created_at: chrono::Utc::now(),
             };
             match routes.insert(route) {
-                Ok(_) => Response::ok_empty(),
+                Ok(_) => {
+                    sync_hosts(&routes);
+                    Response::ok_empty()
+                }
                 Err(e) => Response::err(e.to_string()),
             }
         }
 
         Command::HostsSync => {
-            Response::err("HostsSync not yet implemented".to_string())
+            let hostnames = user_hostnames(&routes);
+            let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
+            match crate::hosts::sync_hosts_file(&refs) {
+                Ok(_) => {
+                    let entries: Vec<serde_json::Value> = refs
+                        .iter()
+                        .map(|h| serde_json::Value::String(format!("127.0.0.1 {h}")))
+                        .collect();
+                    Response::ok(serde_json::Value::Array(entries))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
         }
 
-        Command::HostsClean => {
-            Response::err("HostsClean not yet implemented".to_string())
-        }
+        Command::HostsClean => match crate::hosts::clean_hosts_file() {
+            Ok(_) => Response::ok_empty(),
+            Err(e) => Response::err(e.to_string()),
+        },
 
         Command::Run { .. } => Response::err("use portal run from CLI"),
     }
@@ -249,5 +292,24 @@ mod tests {
         let filtered: Vec<&String> = routes.iter().filter(|h| *h != "_.localhost").collect();
         assert_eq!(filtered.len(), 2);
         assert!(!filtered.iter().any(|h| *h == "_.localhost"));
+    }
+
+    #[test]
+    fn user_hostnames_excludes_inspector() {
+        // Simulate a route list containing the inspector internal route
+        let all = vec![
+            "myapp.localhost".to_string(),
+            "_.localhost".to_string(),
+            "api.localhost".to_string(),
+        ];
+        let user: Vec<&str> = all
+            .iter()
+            .filter(|h| h.as_str() != "_.localhost")
+            .map(|h| h.as_str())
+            .collect();
+        assert_eq!(user.len(), 2);
+        assert!(!user.contains(&"_.localhost"));
+        assert!(user.contains(&"myapp.localhost"));
+        assert!(user.contains(&"api.localhost"));
     }
 }
