@@ -122,7 +122,7 @@ impl LanguageDriver for DockerComposeDriver {
 
     /// No port injection — Docker Compose manages its own port bindings.
     fn port_injection(&self, _cwd: &Path, _port: u16) -> PortInjection {
-        PortInjection::CliArgs(vec![])
+        PortInjection::EnvOnly
     }
 }
 
@@ -181,12 +181,12 @@ mod tests {
     // ── port_injection ────────────────────────────────────────────────────────
 
     #[test]
-    fn port_injection_is_empty_cli_args() {
+    fn port_injection_is_env_only() {
         let tmp = TempDir::new().unwrap();
-        match DockerComposeDriver.port_injection(tmp.path(), 3000) {
-            PortInjection::CliArgs(args) => assert!(args.is_empty(), "expected empty args, got {args:?}"),
-            other => panic!("expected CliArgs, got {other:?}"),
-        }
+        assert!(matches!(
+            DockerComposeDriver.port_injection(tmp.path(), 3000),
+            PortInjection::EnvOnly,
+        ));
     }
 
     // ── service_port_candidates ───────────────────────────────────────────────
@@ -273,6 +273,31 @@ services:
         assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
     }
 
+    #[test]
+    fn service_port_candidates_parses_integer_port() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("compose.yml"), r#"
+services:
+  web:
+    ports:
+      - 3000
+"#).unwrap();
+        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+    }
+
+    #[test]
+    fn service_port_candidates_parses_long_syntax() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("compose.yml"), r#"
+services:
+  web:
+    ports:
+      - published: 3000
+        target: 80
+"#).unwrap();
+        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+    }
+
     // ── project_name ──────────────────────────────────────────────────────────
 
     #[test]
@@ -289,7 +314,8 @@ services: {}
     fn project_name_falls_back_to_directory_name() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("docker-compose.yml"), "services: {}").unwrap();
-        assert!(DockerComposeDriver.project_name(tmp.path()).is_some());
+        let name = DockerComposeDriver.project_name(tmp.path()).unwrap();
+        assert!(!name.is_empty(), "expected non-empty fallback name, got empty string");
     }
 
     // ── priority ──────────────────────────────────────────────────────────────
