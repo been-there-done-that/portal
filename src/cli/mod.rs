@@ -368,10 +368,50 @@ async fn do_run(
         }
     };
 
+    // Detect driver early — needed for service_port_candidates and injection.
+    let registry = crate::detect::DriverRegistry::new(&config);
+    let driver: Option<&dyn crate::detect::LanguageDriver> = if use_full_registry {
+        registry.detect(&cwd)
+    } else {
+        registry.detect_language(&cwd)
+    };
+
+    // Check for service-declared port candidates (e.g., Docker Compose).
+    // If candidates are present portal uses the declared port and skips pool allocation.
+    let declared_port: Option<u16> = {
+        let candidates: Vec<(String, u16)> = driver
+            .map(|d| d.service_port_candidates(&cwd))
+            .unwrap_or_default();
+        match candidates.len() {
+            0 => None,
+            1 => Some(candidates[0].1),
+            _ => {
+                use std::io::IsTerminal;
+                let labels: Vec<String> = candidates
+                    .iter()
+                    .map(|(name, port)| format!("{name} → {port}"))
+                    .collect();
+                let idx = if std::io::stdin().is_terminal() {
+                    dialoguer::Select::new()
+                        .with_prompt("Multiple services found. Which should portal proxy to?")
+                        .items(&labels)
+                        .default(0)
+                        .interact()
+                        .unwrap_or(0)
+                } else {
+                    eprintln!("Multiple services found, selecting first: {}", labels[0]);
+                    0
+                };
+                Some(candidates[idx].1)
+            }
+        }
+    };
+
     // Determine backend port:
-    //   1. User pinned --port  → use it (stop old if exists)
-    //   2. Existing route      → stop old, reuse its port
-    //   3. No existing route   → find a free port
+    //   1. User pinned --port       → use it (stop old if exists)
+    //   2. Driver declared port     → use it directly (skip pool)
+    //   3. Existing route           → stop old, reuse its port
+    //   4. No existing route        → find a free port
     let port = if let Some(explicit_port) = port_override {
         if let Some(_old_port) = reuse_port {
             let mut s = ipc_connect().await?;
@@ -384,6 +424,8 @@ async fn do_run(
             .await;
         }
         explicit_port
+    } else if let Some(dp) = declared_port {
+        dp
     } else if let Some(old_port) = reuse_port {
         let mut s = ipc_connect().await?;
         write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
@@ -398,17 +440,9 @@ async fn do_run(
         )?
     };
 
-    let injection = {
-        let registry = crate::detect::DriverRegistry::new(&config);
-        let driver = if use_full_registry {
-            registry.detect(&cwd)
-        } else {
-            registry.detect_language(&cwd)
-        };
-        driver
-            .map(|d| d.port_injection(&cwd, port))
-            .unwrap_or(crate::detect::PortInjection::EnvOnly)
-    };
+    let injection = driver
+        .map(|d| d.port_injection(&cwd, port))
+        .unwrap_or(crate::detect::PortInjection::EnvOnly);
 
     // Build env vars for the child process
     let port_env_name = config.project.port_env.as_deref().unwrap_or("PORT");
