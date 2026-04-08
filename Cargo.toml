@@ -1,6 +1,6 @@
 [package]
 name = "portal"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Local dev proxy — named .localhost URLs instead of port numbers"
 license = "Apache-2.0"
