@@ -319,6 +319,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_child_uses_separate_process_group() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let id = rand::thread_rng().gen::<u32>();
+            let pgid_file = format!("/tmp/portal_pgid_{id}.txt");
+
+            // sh writes its own process group ID to a file
+            let args = vec![
+                "sh".to_string(), "-c".to_string(),
+                format!("ps -o pgid= -p $$ | tr -d ' ' > {pgid_file}"),
+            ];
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly,
+            ).await.unwrap();
+            let _ = child.wait().await;
+
+            let child_pgid: u32 = std::fs::read_to_string(&pgid_file)
+                .unwrap_or_default().trim().parse().unwrap_or(0);
+            let portal_pgid = unsafe { nix::libc::getpgrp() } as u32;
+
+            // Child should be in a different process group than portal
+            assert_ne!(child_pgid, 0, "child pgid should be non-zero");
+            assert_ne!(child_pgid, portal_pgid,
+                "child pgid ({child_pgid}) should differ from portal pgid ({portal_pgid})");
+
+            let _ = std::fs::remove_file(&pgid_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_child_kills_entire_process_group() {
+        #[cfg(unix)]
+        {
+            use rand::Rng;
+            let id = rand::thread_rng().gen::<u32>();
+            let pid_file = format!("/tmp/portal_grandchild_{id}.txt");
+
+            // sh spawns `sleep 300` in the background and writes its PID to a file,
+            // then waits — so sh is the direct child and sleep is a grandchild.
+            let args = vec![
+                "sh".to_string(), "-c".to_string(),
+                format!("sleep 300 & echo $! > {pid_file}; wait"),
+            ];
+            let mut child = spawn_child(
+                Path::new("/tmp"), &args, 4321, "test.localhost",
+                crate::detect::PortInjection::EnvOnly,
+            ).await.unwrap();
+
+            // Wait for grandchild to start and write its PID
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+            let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
+                .unwrap_or_default().trim().parse().unwrap_or(0);
+            assert!(grandchild_pid > 0, "grandchild pid should be > 0, got file content: {:?}",
+                std::fs::read_to_string(&pid_file));
+            assert!(
+                crate::routes::pid_alive_check(grandchild_pid),
+                "grandchild (sleep) should be alive before stop_child"
+            );
+
+            // stop_child should kill the whole process group (sh + sleep)
+            let _ = stop_child(&mut child).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            assert!(
+                !crate::routes::pid_alive_check(grandchild_pid),
+                "grandchild (sleep) should be dead after stop_child killed the process group"
+            );
+            let _ = std::fs::remove_file(&pid_file);
+        }
+    }
+
+    #[tokio::test]
     async fn spawn_child_append_address_appended() {
         #[cfg(unix)]
         {
@@ -340,4 +415,5 @@ mod tests {
             let _ = std::fs::remove_file(&test_file);
         }
     }
+
 }
