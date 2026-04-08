@@ -5,5 +5,8 @@
 # Superpowers plugin cache
 /.superpowers/
 
+# Git worktrees
+.worktrees/
+
 # OS
 .DS_Store
