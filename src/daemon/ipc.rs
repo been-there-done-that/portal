@@ -115,7 +115,7 @@ async fn handle_connection(
 }
 
 /// Collect hostnames of all user-registered routes (excludes internal `_.localhost`).
-fn user_hostnames(routes: &crate::routes::RouteStore) -> Vec<String> {
+fn user_hostnames(routes: &RouteStore) -> Vec<String> {
     routes
         .list()
         .into_iter()
@@ -125,7 +125,7 @@ fn user_hostnames(routes: &crate::routes::RouteStore) -> Vec<String> {
 }
 
 /// Sync /etc/hosts with current user routes. Logs a warning on failure, never panics.
-fn sync_hosts(routes: &crate::routes::RouteStore) {
+fn sync_hosts(routes: &RouteStore) {
     if !crate::hosts::should_sync() {
         return;
     }
@@ -148,7 +148,6 @@ async fn dispatch(
     match cmd {
         Command::Ls => {
             let _ = routes.remove_stale();
-            sync_hosts(&routes);
             let list: Vec<_> = routes
                 .list()
                 .into_iter()
@@ -282,6 +281,8 @@ async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn ls_hides_inspector_route() {
         let routes: Vec<String> = vec![
@@ -296,20 +297,32 @@ mod tests {
 
     #[test]
     fn user_hostnames_excludes_inspector() {
-        // Simulate a route list containing the inspector internal route
-        let all = vec![
-            "myapp.localhost".to_string(),
-            "_.localhost".to_string(),
-            "api.localhost".to_string(),
-        ];
-        let user: Vec<&str> = all
-            .iter()
-            .filter(|h| h.as_str() != "_.localhost")
-            .map(|h| h.as_str())
-            .collect();
-        assert_eq!(user.len(), 2);
-        assert!(!user.contains(&"_.localhost"));
-        assert!(user.contains(&"myapp.localhost"));
-        assert!(user.contains(&"api.localhost"));
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::routes::RouteStore::new(dir.path().join("routes.json")).unwrap();
+
+        // Insert a real user route
+        store.insert(crate::routes::Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).unwrap();
+
+        // Insert the internal inspector route
+        store.insert(crate::routes::Route {
+            hostname: "_.localhost".to_string(),
+            port: 9999,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: String::new(),
+            created_at: chrono::Utc::now(),
+        }).unwrap();
+
+        let result = user_hostnames(&store);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "myapp.localhost");
+        assert!(!result.contains(&"_.localhost".to_string()));
     }
 }
