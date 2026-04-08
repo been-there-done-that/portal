@@ -39,10 +39,10 @@ pub fn default_install_path(shell: Shell) -> PathBuf {
     }
 }
 
-fn post_install_message(shell: Shell, path: &Path) {
+fn post_install_message(shell: Shell, path: &Path, is_omz: bool) {
     println!("{} Installed to {}", console::style("✓").green(), path.display());
     match shell {
-        Shell::Zsh if !is_omz() => {
+        Shell::Zsh if !is_omz => {
             println!("\nAdd to ~/.zshrc (if not already present):");
             println!("  fpath=(~/.zfunc $fpath)");
             println!("  autoload -Uz compinit && compinit");
@@ -59,9 +59,9 @@ fn post_install_message(shell: Shell, path: &Path) {
 }
 
 pub fn run(
-    shell: Option<Shell>,
-    print: bool,
-    path: Option<PathBuf>,
+    _shell: Option<Shell>,
+    _print: bool,
+    _path: Option<PathBuf>,
 ) -> crate::error::Result<()> {
     todo!()
 }
@@ -69,10 +69,13 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn detect_shell_bash() {
-        // SAFETY: single-threaded test, no other threads reading SHELL
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SHELL", "/bin/bash") };
         assert!(matches!(detect_shell(), Some(Shell::Bash)));
         unsafe { std::env::remove_var("SHELL") };
@@ -80,6 +83,7 @@ mod tests {
 
     #[test]
     fn detect_shell_zsh() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SHELL", "/usr/local/bin/zsh") };
         assert!(matches!(detect_shell(), Some(Shell::Zsh)));
         unsafe { std::env::remove_var("SHELL") };
@@ -87,6 +91,7 @@ mod tests {
 
     #[test]
     fn detect_shell_fish() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SHELL", "/opt/homebrew/bin/fish") };
         assert!(matches!(detect_shell(), Some(Shell::Fish)));
         unsafe { std::env::remove_var("SHELL") };
@@ -94,6 +99,7 @@ mod tests {
 
     #[test]
     fn detect_shell_pwsh() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SHELL", "/usr/local/bin/pwsh") };
         assert!(matches!(detect_shell(), Some(Shell::PowerShell)));
         unsafe { std::env::remove_var("SHELL") };
@@ -101,6 +107,7 @@ mod tests {
 
     #[test]
     fn detect_shell_elvish() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SHELL", "/usr/local/bin/elvish") };
         assert!(matches!(detect_shell(), Some(Shell::Elvish)));
         unsafe { std::env::remove_var("SHELL") };
@@ -108,6 +115,7 @@ mod tests {
 
     #[test]
     fn detect_shell_unknown_returns_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("SHELL", "/usr/bin/tcsh") };
         assert!(detect_shell().is_none());
         unsafe { std::env::remove_var("SHELL") };
@@ -115,24 +123,28 @@ mod tests {
 
     #[test]
     fn detect_shell_unset_returns_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("SHELL") };
         assert!(detect_shell().is_none());
     }
 
     #[test]
     fn default_path_fish() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Fish);
         assert!(path.to_string_lossy().ends_with(".config/fish/completions/portal.fish"));
     }
 
     #[test]
     fn default_path_bash() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Bash);
         assert!(path.to_string_lossy().ends_with(".local/share/bash-completion/completions/portal"));
     }
 
     #[test]
     fn default_path_zsh_no_omz() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("ZSH") };
         let path = default_install_path(Shell::Zsh);
         assert!(path.to_string_lossy().ends_with(".zfunc/_portal"));
@@ -140,6 +152,7 @@ mod tests {
 
     #[test]
     fn default_path_zsh_with_omz() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // Create a temp dir to simulate $ZSH pointing to a real directory
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ZSH", tmp.path()) };
@@ -150,12 +163,14 @@ mod tests {
 
     #[test]
     fn default_path_powershell() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::PowerShell);
         assert!(path.to_string_lossy().ends_with("PowerShell/Completions/portal.ps1"));
     }
 
     #[test]
     fn default_path_elvish() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Elvish);
         assert!(path.to_string_lossy().ends_with(".config/elvish/lib/portal.elv"));
     }
