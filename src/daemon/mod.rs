@@ -183,7 +183,7 @@ async fn run_daemon_loop() -> Result<()> {
 
     // Start HTTP redirect listener
     let http_https_port = config.proxy.https_port;
-    tokio::spawn(serve_http_redirect(http_listener, http_https_port));
+    tokio::spawn(serve_http_redirect(http_listener, config.proxy.http_port, http_https_port));
 
     // Start HTTPS proxy listener
     {
