@@ -108,7 +108,7 @@ fn plain_error(status: http::StatusCode, msg: &str) -> Response<BoxBodyType> {
 /// Main proxy handler for HTTPS requests.
 pub async fn handle_https_request(
     req: Request<Incoming>,
-    routes: crate::routes::RouteStore,
+    routes: crate::routes::StateStore,
     inspector: Option<crate::inspector::InspectorSender>,
 ) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
     let start = std::time::Instant::now();

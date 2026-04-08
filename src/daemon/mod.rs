@@ -5,7 +5,7 @@ use crate::certs::CertStore;
 use crate::config::{dirs_for_state, Config};
 use crate::error::Result;
 use crate::proxy::serve_http_redirect;
-use crate::routes::RouteStore;
+use crate::routes::StateStore;
 
 /// Entry point called by `portless daemon`.
 ///
@@ -130,7 +130,7 @@ async fn run_daemon_loop() -> Result<()> {
     let config = Config::load(&std::env::current_dir().unwrap_or_default())?;
 
     // Init route store
-    let routes = match RouteStore::new(state_dir.join("routes.json")) {
+    let routes = match StateStore::new(state_dir.join("routes.json")) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("portal: failed to load route store: {e}");
@@ -157,7 +157,7 @@ async fn run_daemon_loop() -> Result<()> {
                 owner_pid: std::process::id(),
                 cwd: String::new(),
                 created_at: chrono::Utc::now(),
-            });
+            }).await;
             tracing::info!("portal inspector started at _.localhost (internal port {})", insp.port);
             Some(insp.sender)
         }
@@ -226,7 +226,7 @@ fn redirect_stdio(log_path: &std::path::Path) {
 async fn serve_https(
     listener: tokio::net::TcpListener,
     cert_store: CertStore,
-    routes: RouteStore,
+    routes: StateStore,
     inspector: Option<crate::inspector::InspectorSender>,
 ) {
     use hyper::server::conn::http1;

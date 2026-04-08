@@ -18,19 +18,21 @@ pub struct Route {
     pub created_at: DateTime<Utc>,
 }
 
-/// Thread-safe store backed by DashMap with atomic JSON persistence.
+/// Thread-safe store backed by DashMap.
+/// Reads (get, list) are lock-free.
+/// Writes (insert, remove, remove_stale) are serialised under a tokio Mutex
+/// and atomically update routes.json + /etc/hosts in one locked transaction.
 #[derive(Clone)]
-pub struct RouteStore {
+pub struct StateStore {
     map: Arc<DashMap<String, Route>>,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
     path: PathBuf,
 }
 
-impl RouteStore {
-    /// Create a new RouteStore. Loads from disk if file exists.
+impl StateStore {
+    /// Create a new StateStore. Loads existing routes from disk if file exists.
     pub fn new(path: PathBuf) -> Result<Self> {
         let map = Arc::new(DashMap::new());
-
-        // Load from disk if file exists
         if path.exists() {
             let contents = std::fs::read_to_string(&path)?;
             if !contents.is_empty() {
@@ -40,73 +42,67 @@ impl RouteStore {
                 }
             }
         }
-
-        Ok(Self { map, path })
+        Ok(Self {
+            map,
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            path,
+        })
     }
 
-    /// Insert a route and persist to disk.
-    pub fn insert(&self, route: Route) -> Result<()> {
-        self.map.insert(route.hostname.clone(), route);
-        self.persist()?;
-        Ok(())
-    }
+    // ── Read API (lock-free) ──────────────────────────────────────────────
 
-    /// Remove a route by hostname and persist to disk.
-    pub fn remove(&self, hostname: &str) -> Result<()> {
-        self.map.remove(hostname);
-        self.persist()?;
-        Ok(())
-    }
-
-    /// Get a route by hostname.
     pub fn get(&self, hostname: &str) -> Option<Route> {
-        self.map.get(hostname).map(|entry| entry.clone())
+        self.map.get(hostname).map(|e| e.clone())
     }
 
-    /// List all routes.
     pub fn list(&self) -> Vec<Route> {
-        self.map.iter().map(|entry| entry.value().clone()).collect()
+        self.map.iter().map(|e| e.value().clone()).collect()
     }
 
-    /// Remove routes with dead PIDs.
-    pub fn remove_stale(&self) -> Result<()> {
-        let mut to_remove = Vec::new();
+    // ── Write API (serialised) ────────────────────────────────────────────
 
-        for entry in self.map.iter() {
-            let route = entry.value();
-            if !pid_alive_check(route.pid) {
-                to_remove.push(route.hostname.clone());
-            }
-        }
-
-        let had_removals = !to_remove.is_empty();
-
-        for hostname in to_remove {
-            self.map.remove(&hostname);
-        }
-
-        if had_removals {
-            self.persist()?;
-        }
-
+    pub async fn insert(&self, route: Route) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.map.insert(route.hostname.clone(), route);
+        self.persist_locked()?;
+        self.sync_hosts_locked();
         Ok(())
     }
 
-    /// Persist all routes to disk atomically.
-    fn persist(&self) -> Result<()> {
-        let routes: Vec<Route> = self.map.iter().map(|entry| entry.value().clone()).collect();
+    pub async fn remove(&self, hostname: &str) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        self.map.remove(hostname);
+        self.persist_locked()?;
+        self.sync_hosts_locked();
+        Ok(())
+    }
 
+    pub async fn remove_stale(&self) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let to_remove: Vec<String> = self.map.iter()
+            .filter(|e| !pid_alive_check(e.value().pid))
+            .map(|e| e.key().clone())
+            .collect();
+        if to_remove.is_empty() {
+            return Ok(());
+        }
+        for h in &to_remove {
+            self.map.remove(h);
+        }
+        self.persist_locked()?;
+        self.sync_hosts_locked();
+        Ok(())
+    }
+
+    // ── Private helpers (called while write_lock is held) ─────────────────
+
+    fn persist_locked(&self) -> Result<()> {
+        let routes: Vec<Route> = self.map.iter().map(|e| e.value().clone()).collect();
         let json = serde_json::to_string_pretty(&routes)?;
         let tmp_path = format!("{}.tmp", self.path.display());
-
-        // Write to temporary file
-        std::fs::write(&tmp_path, json)?;
-
-        // Atomic rename
+        std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, &self.path)?;
 
-        // Chown to the invoking user when running under sudo so the non-root
-        // CLI can also read/write the file on subsequent daemon restarts.
         #[cfg(unix)]
         if let Some((uid, gid)) = crate::config::sudo_uid_gid() {
             unsafe {
@@ -114,8 +110,21 @@ impl RouteStore {
                 nix::libc::chown(p.as_ptr(), uid, gid);
             }
         }
-
         Ok(())
+    }
+
+    fn sync_hosts_locked(&self) {
+        if !crate::hosts::should_sync() {
+            return;
+        }
+        let hostnames: Vec<String> = self.map.iter()
+            .filter(|e| e.key() != "_.localhost")
+            .map(|e| e.key().clone())
+            .collect();
+        let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
+        if let Err(e) = crate::hosts::sync_hosts_file(&refs) {
+            tracing::warn!("hosts sync failed: {e}");
+        }
     }
 }
 
@@ -162,11 +171,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn insert_and_get() {
+    #[tokio::test]
+    async fn insert_and_get() {
         let temp = TempDir::new().unwrap();
         let store_path = temp.path().join("routes.json");
-        let store = RouteStore::new(store_path).unwrap();
+        let store = StateStore::new(store_path).unwrap();
 
         let route = Route {
             hostname: "myapp.localhost".to_string(),
@@ -177,20 +186,20 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        store.insert(route.clone()).unwrap();
+        store.insert(route.clone()).await.unwrap();
 
         let retrieved = store.get("myapp.localhost").unwrap();
         assert_eq!(retrieved.port, 4000);
         assert_eq!(retrieved.hostname, "myapp.localhost");
     }
 
-    #[test]
-    fn persists_across_reload() {
+    #[tokio::test]
+    async fn persists_across_reload() {
         let temp = TempDir::new().unwrap();
         let store_path = temp.path().join("routes.json");
 
         {
-            let store = RouteStore::new(store_path.clone()).unwrap();
+            let store = StateStore::new(store_path.clone()).unwrap();
             let route = Route {
                 hostname: "myapp.localhost".to_string(),
                 port: 4000,
@@ -199,20 +208,20 @@ mod tests {
                 cwd: "/tmp".to_string(),
                 created_at: Utc::now(),
             };
-            store.insert(route).unwrap();
+            store.insert(route).await.unwrap();
         }
 
         // Create new store from same path
-        let store = RouteStore::new(store_path).unwrap();
+        let store = StateStore::new(store_path).unwrap();
         let retrieved = store.get("myapp.localhost").unwrap();
         assert_eq!(retrieved.port, 4000);
     }
 
-    #[test]
-    fn remove_works() {
+    #[tokio::test]
+    async fn remove_works() {
         let temp = TempDir::new().unwrap();
         let store_path = temp.path().join("routes.json");
-        let store = RouteStore::new(store_path).unwrap();
+        let store = StateStore::new(store_path).unwrap();
 
         let route = Route {
             hostname: "myapp.localhost".to_string(),
@@ -223,18 +232,18 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        store.insert(route).unwrap();
+        store.insert(route).await.unwrap();
         assert!(store.get("myapp.localhost").is_some());
 
-        store.remove("myapp.localhost").unwrap();
+        store.remove("myapp.localhost").await.unwrap();
         assert!(store.get("myapp.localhost").is_none());
     }
 
-    #[test]
-    fn stale_cleanup_removes_dead_pids() {
+    #[tokio::test]
+    async fn stale_cleanup_removes_dead_pids() {
         let temp = TempDir::new().unwrap();
         let store_path = temp.path().join("routes.json");
-        let store = RouteStore::new(store_path).unwrap();
+        let store = StateStore::new(store_path).unwrap();
 
         // Insert route with current process PID (definitely alive)
         let current_pid = std::process::id();
@@ -257,15 +266,89 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        store.insert(route_alive).unwrap();
-        store.insert(route_dead).unwrap();
+        store.insert(route_alive).await.unwrap();
+        store.insert(route_dead).await.unwrap();
 
         // Run cleanup
-        store.remove_stale().unwrap();
+        store.remove_stale().await.unwrap();
 
         // Alive route should remain
         assert!(store.get("alive.localhost").is_some());
         // Dead route should be removed
+        assert!(store.get("dead.localhost").is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_inserts_no_data_loss() {
+        use std::sync::Arc;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(StateStore::new(temp.path().join("routes.json")).unwrap());
+
+        let mut handles = vec![];
+        for i in 0u32..20 {
+            let s = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                s.insert(crate::routes::Route {
+                    hostname: format!("app{i}.localhost"),
+                    port: 4000 + i as u16,
+                    pid: std::process::id(),
+                    owner_pid: std::process::id(),
+                    cwd: "/tmp".to_string(),
+                    created_at: chrono::Utc::now(),
+                }).await.unwrap();
+            }));
+        }
+        for h in handles { h.await.unwrap(); }
+
+        assert_eq!(store.list().len(), 20);
+
+        let store2 = StateStore::new(temp.path().join("routes.json")).unwrap();
+        assert_eq!(store2.list().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn state_store_remove_works() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
+        store.insert(crate::routes::Route {
+            hostname: "test.localhost".to_string(),
+            port: 4000,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).await.unwrap();
+        assert!(store.get("test.localhost").is_some());
+        store.remove("test.localhost").await.unwrap();
+        assert!(store.get("test.localhost").is_none());
+    }
+
+    #[tokio::test]
+    async fn state_store_remove_stale_removes_dead_pids() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
+
+        store.insert(crate::routes::Route {
+            hostname: "alive.localhost".to_string(),
+            port: 4000,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).await.unwrap();
+
+        store.insert(crate::routes::Route {
+            hostname: "dead.localhost".to_string(),
+            port: 4001,
+            pid: u32::MAX,
+            owner_pid: u32::MAX,
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).await.unwrap();
+
+        store.remove_stale().await.unwrap();
+
+        assert!(store.get("alive.localhost").is_some());
         assert!(store.get("dead.localhost").is_none());
     }
 }

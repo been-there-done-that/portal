@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use crate::config::dirs_for_state;
 use crate::proto::{read_frame, write_frame, Command, Response};
-use crate::routes::RouteStore;
+use crate::routes::StateStore;
 
 pub struct IpcServer {
     sock_path: PathBuf,
     pid_path: PathBuf,
-    routes: RouteStore,
+    routes: StateStore,
     start_time: std::time::Instant,
     http_port: u16,
     https_port: u16,
@@ -17,7 +17,7 @@ impl IpcServer {
     pub fn new(
         sock_path: PathBuf,
         pid_path: PathBuf,
-        routes: RouteStore,
+        routes: StateStore,
         http_port: u16,
         https_port: u16,
     ) -> Self {
@@ -97,7 +97,7 @@ impl IpcServer {
 
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
-    routes: RouteStore,
+    routes: StateStore,
     start_time: std::time::Instant,
     sock_path: PathBuf,
     pid_path: PathBuf,
@@ -115,7 +115,7 @@ async fn handle_connection(
 }
 
 /// Collect hostnames of all user-registered routes (excludes internal `_.localhost`).
-fn user_hostnames(routes: &RouteStore) -> Vec<String> {
+fn user_hostnames(routes: &StateStore) -> Vec<String> {
     routes
         .list()
         .into_iter()
@@ -124,21 +124,9 @@ fn user_hostnames(routes: &RouteStore) -> Vec<String> {
         .collect()
 }
 
-/// Sync /etc/hosts with current user routes. Logs a warning on failure, never panics.
-fn sync_hosts(routes: &RouteStore) {
-    if !crate::hosts::should_sync() {
-        return;
-    }
-    let hostnames = user_hostnames(routes);
-    let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
-    if let Err(e) = crate::hosts::sync_hosts_file(&refs) {
-        tracing::warn!("hosts sync failed: {e}");
-    }
-}
-
 async fn dispatch(
     cmd: Command,
-    routes: RouteStore,
+    routes: StateStore,
     start_time: std::time::Instant,
     sock_path: PathBuf,
     pid_path: PathBuf,
@@ -147,7 +135,7 @@ async fn dispatch(
 ) -> Response {
     match cmd {
         Command::Ls => {
-            let _ = routes.remove_stale();
+            let _ = routes.remove_stale().await;
             let list: Vec<_> = routes
                 .list()
                 .into_iter()
@@ -182,16 +170,14 @@ async fn dispatch(
                         use nix::unistd::Pid;
                         killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
-                    let _ = routes.remove(&hostname);
-                    sync_hosts(&routes);
+                    let _ = routes.remove(&hostname).await;
                     Response::ok_empty()
                 }
             }
         }
 
         Command::Rm { hostname } => {
-            let _ = routes.remove(&hostname);
-            sync_hosts(&routes);
+            let _ = routes.remove(&hostname).await;
             Response::ok_empty()
         }
 
@@ -246,11 +232,8 @@ async fn dispatch(
                 cwd,
                 created_at: chrono::Utc::now(),
             };
-            match routes.insert(route) {
-                Ok(_) => {
-                    sync_hosts(&routes);
-                    Response::ok_empty()
-                }
+            match routes.insert(route).await {
+                Ok(_) => Response::ok_empty(),
                 Err(e) => Response::err(e.to_string()),
             }
         }
@@ -296,10 +279,10 @@ mod tests {
         assert!(!filtered.iter().any(|h| *h == "_.localhost"));
     }
 
-    #[test]
-    fn user_hostnames_excludes_inspector() {
+    #[tokio::test]
+    async fn user_hostnames_excludes_inspector() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::routes::RouteStore::new(dir.path().join("routes.json")).unwrap();
+        let store = crate::routes::StateStore::new(dir.path().join("routes.json")).unwrap();
 
         // Insert a real user route
         store.insert(crate::routes::Route {
@@ -309,7 +292,7 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: chrono::Utc::now(),
-        }).unwrap();
+        }).await.unwrap();
 
         // Insert the internal inspector route
         store.insert(crate::routes::Route {
@@ -319,7 +302,7 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: String::new(),
             created_at: chrono::Utc::now(),
-        }).unwrap();
+        }).await.unwrap();
 
         let result = user_hostnames(&store);
         assert_eq!(result.len(), 1);
