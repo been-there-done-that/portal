@@ -209,6 +209,9 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
             "PORTAL_HTTPS_PORT" => {
                 config.proxy.https_port = value.parse()?;
             }
+            "PORTAL_PORT_ENV" => {
+                config.project.port_env = Some(value.to_string());
+            }
             _ => {
                 // Ignore unknown env vars
             }
@@ -429,6 +432,13 @@ tld = "test"
         let env_overrides = [("PORTAL_HTTP_PORT", "not_a_number")];
         let result = Config::load_with_paths(None, None, &env_overrides);
         assert!(result.is_err(), "expected error for invalid port value");
+    }
+
+    #[test]
+    fn portal_port_env_var_sets_port_env() {
+        let env_overrides = [("PORTAL_PORT_ENV", "APP_PORT")];
+        let config = Config::load_with_paths(None, None, &env_overrides).unwrap();
+        assert_eq!(config.project.port_env, Some("APP_PORT".to_string()));
     }
 
     #[test]

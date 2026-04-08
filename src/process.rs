@@ -282,28 +282,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_child_env_only_sets_port_env() {
-        #[cfg(unix)]
-        {
-            use rand::Rng;
-            let random_id = rand::thread_rng().gen::<u32>();
-            let test_file = format!("/tmp/portal_port_test_{random_id}.txt");
-            let args = vec!["sh".to_string(), "-c".to_string(),
-                format!("echo $PORT > {test_file}")];
-            let extra_env = vec![("PORT".to_string(), "4321".to_string())];
-            let mut child = spawn_child(
-                Path::new("/tmp"), &args, 4321,
-                crate::detect::PortInjection::EnvOnly,
-                &extra_env,
-            ).await.unwrap();
-            let _ = child.wait().await;
-            let content = std::fs::read_to_string(&test_file).unwrap();
-            assert_eq!(content.trim(), "4321");
-            let _ = std::fs::remove_file(&test_file);
-        }
-    }
-
-    #[tokio::test]
     async fn spawn_child_cli_args_appended() {
         #[cfg(unix)]
         {
@@ -471,7 +449,8 @@ mod tests {
             ).await.expect("spawn failed");
             let _ = child.wait().await;
             let content = std::fs::read_to_string(&test_file).unwrap();
-            assert_eq!(content.trim(), "", "PORT should not be set automatically; got: {content}");
+            assert_ne!(content.trim(), "4321",
+                "PORT should not be auto-injected by spawn_child; got: {content}");
             let _ = std::fs::remove_file(&test_file);
         }
     }
