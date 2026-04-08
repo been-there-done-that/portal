@@ -103,8 +103,9 @@ pub fn run(
     print!("Install completion to {}? [Y/n] ", install_path.display());
     std::io::stdout().flush()?;
 
-    // Confirm: read from stdin whether or not it's a TTY.
-    // EOF (e.g. /dev/null in CI) leaves `input` empty, which the match below treats as "yes".
+    // Confirm: always read from stdin (don't auto-yes on non-TTY).
+    // This lets callers pipe explicit "n" to decline. EOF (e.g. /dev/null in CI)
+    // leaves `input` empty, which the match below treats as "yes" — so CI still auto-confirms.
     let confirmed = {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
