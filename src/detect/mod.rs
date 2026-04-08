@@ -28,6 +28,26 @@ pub struct DriverRegistry {
 }
 
 impl DriverRegistry {
+    /// Build the default registry with all built-in drivers registered.
+    pub fn new(config: &crate::config::Config) -> Self {
+        let mut reg = Self {
+            drivers: vec![
+                Box::new(PortalTomlDriver { config: config.project.clone() }),
+                Box::new(python::DjangoDriver),
+                Box::new(python::UvicornDriver),
+                Box::new(python::FlaskDriver),
+                Box::new(ruby::RailsDriver),
+                Box::new(ruby::RackDriver),
+                Box::new(php::PhpDriver),
+                Box::new(go::GoDriver),
+                Box::new(rust::RustDriver),
+                Box::new(node::NodeDriver),
+            ],
+        };
+        reg.sort();
+        reg
+    }
+
     pub fn sort(&mut self) {
         self.drivers.sort_by(|a, b| b.priority().cmp(&a.priority()));
     }
@@ -333,6 +353,43 @@ mod tests {
             }
             _ => panic!("expected CliArgs"),
         }
+    }
+
+    #[test]
+    fn registry_new_detects_django() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("manage.py"), "").unwrap();
+        let cfg = crate::config::Config::default();
+        let reg = DriverRegistry::new(&cfg);
+        assert_eq!(reg.detect(tmp.path()).unwrap().name(), "Django (Python)");
+    }
+
+    #[test]
+    fn registry_portal_toml_beats_django() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("manage.py"), "").unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.project.start_command = Some("my-custom-server".to_string());
+        let reg = DriverRegistry::new(&cfg);
+        assert_eq!(reg.detect(tmp.path()).unwrap().name(), "portal.toml");
+    }
+
+    #[test]
+    fn registry_detect_language_skips_portal_toml() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("manage.py"), "").unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.project.start_command = Some("my-custom-server".to_string());
+        let reg = DriverRegistry::new(&cfg);
+        assert_eq!(reg.detect_language(tmp.path()).unwrap().name(), "Django (Python)");
+    }
+
+    #[test]
+    fn registry_returns_none_for_unknown_project() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = crate::config::Config::default();
+        let reg = DriverRegistry::new(&cfg);
+        assert!(reg.detect(tmp.path()).is_none());
     }
 
     #[test]
