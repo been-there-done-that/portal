@@ -94,6 +94,69 @@ pub fn extract_managed(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Read the hosts file. Returns empty string on failure.
+fn read_hosts() -> String {
+    std::fs::read_to_string(hosts_path()).unwrap_or_default()
+}
+
+/// Core sync logic — writes to `path` instead of the real hosts file.
+/// This separation allows tests to use a temp file.
+pub fn sync_hosts_file_at(hostnames: &[&str], path: &std::path::Path) -> crate::error::Result<()> {
+    let tmp_path = path.with_extension("tmp");
+
+    // Preserve existing file permissions before overwriting
+    #[cfg(unix)]
+    let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
+
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let cleaned = remove_block(&content);
+
+    let new_content = if hostnames.is_empty() {
+        cleaned
+    } else {
+        let block = build_block(hostnames);
+        format!("{}\n{}\n", cleaned.trim_end(), block)
+    };
+
+    std::fs::write(&tmp_path, &new_content)?;
+
+    // Restore permissions on the temp file before atomic rename
+    #[cfg(unix)]
+    if let Some(perms) = existing_perms {
+        let _ = std::fs::set_permissions(&tmp_path, perms);
+    }
+
+    std::fs::rename(&tmp_path, path)?;
+
+    Ok(())
+}
+
+/// Sync the real /etc/hosts with the given hostnames, then flush the macOS DNS cache.
+pub fn sync_hosts_file(hostnames: &[&str]) -> crate::error::Result<()> {
+    sync_hosts_file_at(hostnames, &hosts_path())?;
+
+    #[cfg(target_os = "macos")]
+    flush_dns_cache();
+
+    Ok(())
+}
+
+/// Remove the portless-managed block from /etc/hosts.
+pub fn clean_hosts_file() -> crate::error::Result<()> {
+    sync_hosts_file(&[])
+}
+
+/// Fire-and-forget DNS cache flush on macOS. Failures are swallowed.
+#[cfg(target_os = "macos")]
+fn flush_dns_cache() {
+    let _ = std::process::Command::new("dscacheutil")
+        .arg("-flushcache")
+        .output();
+    let _ = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponder"])
+        .output();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +302,65 @@ mod tests {
         let rebuilt = format!("{}\n{}\n", cleaned.trim_end(), build_block(hostnames));
         let cleaned2 = remove_block(&rebuilt);
         assert_eq!(cleaned, cleaned2);
+    }
+
+    #[test]
+    fn sync_creates_managed_block_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+        sync_hosts_file_at(&["myapp.localhost"], &hosts_file).unwrap();
+
+        let content = std::fs::read_to_string(&hosts_file).unwrap();
+        assert!(content.contains("# portless-start"));
+        assert!(content.contains("127.0.0.1 myapp.localhost"));
+        assert!(content.contains("# portless-end"));
+        assert!(content.contains("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn sync_replaces_existing_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        let initial = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 oldapp.localhost\n# portless-end\n";
+        std::fs::write(&hosts_file, initial).unwrap();
+
+        sync_hosts_file_at(&["newapp.localhost"], &hosts_file).unwrap();
+
+        let content = std::fs::read_to_string(&hosts_file).unwrap();
+        assert!(content.contains("127.0.0.1 newapp.localhost"));
+        assert!(!content.contains("oldapp.localhost"));
+    }
+
+    #[test]
+    fn sync_empty_removes_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        let initial = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
+        std::fs::write(&hosts_file, initial).unwrap();
+
+        sync_hosts_file_at(&[], &hosts_file).unwrap();
+
+        let content = std::fs::read_to_string(&hosts_file).unwrap();
+        assert!(!content.contains("portless-start"));
+        assert!(!content.contains("myapp.localhost"));
+        assert!(content.contains("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn sync_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+        let hostnames = &["myapp.localhost", "api.localhost"];
+        sync_hosts_file_at(hostnames, &hosts_file).unwrap();
+        let content1 = std::fs::read_to_string(&hosts_file).unwrap();
+
+        sync_hosts_file_at(hostnames, &hosts_file).unwrap();
+        let content2 = std::fs::read_to_string(&hosts_file).unwrap();
+
+        assert_eq!(content1, content2);
     }
 }
