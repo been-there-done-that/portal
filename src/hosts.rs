@@ -43,7 +43,7 @@ pub fn build_block(hostnames: &[&str]) -> String {
 }
 
 /// Strip the portless-managed block from hosts file content.
-/// Collapses 3+ consecutive blank lines to 2, trims trailing whitespace,
+/// Collapses 3+ consecutive blank lines to at most 1, trims trailing whitespace,
 /// and ensures a single trailing newline.
 pub fn remove_block(content: &str) -> String {
     let start_idx = content.find(MARKER_START);

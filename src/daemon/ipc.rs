@@ -255,6 +255,7 @@ async fn dispatch(
             }
         }
 
+        // Note: explicit user command — bypasses PORTAL_SYNC_HOSTS opt-out intentionally.
         Command::HostsSync => {
             let hostnames = user_hostnames(&routes);
             let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
