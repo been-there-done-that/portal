@@ -324,21 +324,36 @@ where
             .unwrap());
     }
 
-    // 3. Read upstream's 101 response
-    let mut buf = vec![0u8; 1024];
-    let n = match upstream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
-        _ => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("content-type", "text/plain")
-                .body(full_body("502 Bad Gateway: upstream did not respond to WebSocket upgrade"))
-                .unwrap());
+    // 3. Read upstream's 101 response (loop until \r\n\r\n received)
+    let mut buf = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 256];
+    loop {
+        match upstream.read(&mut tmp).await {
+            Ok(0) | Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .header("content-type", "text/plain")
+                    .body(full_body("502 Bad Gateway: upstream did not respond to WebSocket upgrade"))
+                    .unwrap());
+            }
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if buf.len() > 8192 {
+                    // Response header too large — abort
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .header("content-type", "text/plain")
+                        .body(full_body("502 Bad Gateway: upstream response too large"))
+                        .unwrap());
+                }
+            }
         }
-    };
-
-    let response_head = String::from_utf8_lossy(&buf[..n]);
-    if !response_head.contains("101") {
+    }
+    let response_head = String::from_utf8_lossy(&buf);
+    if !response_head.starts_with("HTTP/1.1 101") {
         return Ok(Response::builder()
             .status(StatusCode::BAD_GATEWAY)
             .header("content-type", "text/plain")
@@ -347,12 +362,24 @@ where
     }
 
     // 4. Return 101 to client and bridge the two connections
-    let resp = Response::builder()
-        .status(StatusCode::SWITCHING_PROTOCOLS)
-        .header(http::header::UPGRADE, "websocket")
-        .header(http::header::CONNECTION, "Upgrade")
-        .body(full_body(""))
-        .unwrap();
+    // Parse and forward upstream 101 response headers to the client
+    let mut resp_builder = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+    // Extract the headers section (after the status line, before \r\n\r\n)
+    if let Some(headers_str) = response_head.splitn(2, "\r\n").nth(1) {
+        let headers_section = headers_str.splitn(2, "\r\n\r\n").next().unwrap_or("");
+        for line in headers_section.lines() {
+            if let Some((name, value)) = line.split_once(": ") {
+                let name_lower = name.to_lowercase();
+                // Forward upgrade-relevant headers
+                if matches!(name_lower.as_str(), "upgrade" | "connection" | "sec-websocket-accept" | "sec-websocket-protocol" | "sec-websocket-extensions") {
+                    if let Ok(val) = http::HeaderValue::from_str(value) {
+                        resp_builder = resp_builder.header(name_lower, val);
+                    }
+                }
+            }
+        }
+    }
+    let resp = resp_builder.body(full_body("")).unwrap();
 
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
