@@ -10,6 +10,9 @@ pub trait LanguageDriver: Send + Sync {
     fn project_name(&self, cwd: &Path) -> Option<String>;
     fn start_command(&self, cwd: &Path) -> Option<String>;
     fn port_injection(&self, cwd: &Path, port: u16) -> PortInjection;
+    /// Return (service_name, host_port) pairs for services that declare port mappings.
+    /// Default is empty — most drivers do not use this.
+    fn service_port_candidates(&self, _cwd: &Path) -> Vec<(String, u16)> { vec![] }
 }
 
 // ─── Port injection strategy ─────────────────────────────────────────────────
@@ -41,6 +44,7 @@ impl DriverRegistry {
                 Box::new(php::PhpDriver),
                 Box::new(go::GoDriver),
                 Box::new(rust::RustDriver),
+                Box::new(docker_compose::DockerComposeDriver),
                 Box::new(storybook::StorybookDriver),
                 Box::new(node::NodeDriver),
             ],
@@ -427,5 +431,31 @@ mod tests {
         let driver = PortalTomlDriver { config: cfg };
         let tmp = TempDir::new().unwrap();
         assert!(matches!(driver.port_injection(tmp.path(), 4123), PortInjection::EnvOnly));
+    }
+
+    #[test]
+    fn registry_docker_compose_beats_node_for_compose_project() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("package.json"), r#"{"name":"app"}"#).unwrap();
+        fs::write(tmp.path().join("docker-compose.yml"), "services: {}").unwrap();
+        let cfg = crate::config::Config::default();
+        let reg = DriverRegistry::new(&cfg);
+        assert_eq!(reg.detect(tmp.path()).unwrap().name(), "Docker Compose");
+    }
+
+    #[test]
+    fn registry_docker_compose_service_port_candidates_via_trait() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("docker-compose.yml"), r#"
+services:
+  web:
+    ports:
+      - "3000:80"
+"#).unwrap();
+        let cfg = crate::config::Config::default();
+        let reg = DriverRegistry::new(&cfg);
+        let driver = reg.detect(tmp.path()).unwrap();
+        let candidates = driver.service_port_candidates(tmp.path());
+        assert_eq!(candidates, vec![("web".to_string(), 3000u16)]);
     }
 }

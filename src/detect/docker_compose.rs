@@ -62,36 +62,6 @@ fn read_compose_yaml(cwd: &Path) -> Option<serde_yaml::Value> {
     None
 }
 
-impl DockerComposeDriver {
-    /// Return every service that has a `ports:` mapping as `(service_name, host_port)`.
-    /// The first port entry of each service is used.
-    pub fn service_port_candidates(&self, cwd: &Path) -> Vec<(String, u16)> {
-        let yaml = match read_compose_yaml(cwd) {
-            Some(y) => y,
-            None => return vec![],
-        };
-        let services = match yaml.get("services").and_then(|v| v.as_mapping()) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mut candidates = Vec::new();
-        for (key, service) in services {
-            let name = match key.as_str() {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if let Some(ports) = service.get("ports").and_then(|v| v.as_sequence()) {
-                if let Some(first) = ports.first() {
-                    if let Some(port) = parse_host_port(first) {
-                        candidates.push((name, port));
-                    }
-                }
-            }
-        }
-        candidates
-    }
-}
-
 impl LanguageDriver for DockerComposeDriver {
     fn detect(&self, cwd: &Path) -> bool {
         COMPOSE_FILES.iter().any(|name| cwd.join(name).is_file())
@@ -123,6 +93,32 @@ impl LanguageDriver for DockerComposeDriver {
     /// No port injection — Docker Compose manages its own port bindings.
     fn port_injection(&self, _cwd: &Path, _port: u16) -> PortInjection {
         PortInjection::EnvOnly
+    }
+
+    fn service_port_candidates(&self, cwd: &Path) -> Vec<(String, u16)> {
+        let yaml = match read_compose_yaml(cwd) {
+            Some(y) => y,
+            None => return vec![],
+        };
+        let services = match yaml.get("services").and_then(|v| v.as_mapping()) {
+            Some(s) => s,
+            None => return vec![],
+        };
+        let mut candidates = Vec::new();
+        for (key, service) in services {
+            let name = match key.as_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if let Some(ports) = service.get("ports").and_then(|v| v.as_sequence()) {
+                if let Some(first) = ports.first() {
+                    if let Some(port) = parse_host_port(first) {
+                        candidates.push((name, port));
+                    }
+                }
+            }
+        }
+        candidates
     }
 }
 
