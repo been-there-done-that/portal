@@ -103,13 +103,11 @@ pub fn run(
     print!("Install completion to {}? [Y/n] ", install_path.display());
     std::io::stdout().flush()?;
 
-    // Confirm: auto-yes when stdin is not a TTY (piped/scripted usage)
-    let confirmed = if std::io::stdin().is_terminal() {
+    // Confirm: read from stdin whether or not it's a TTY
+    let confirmed = {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         matches!(input.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes")
-    } else {
-        true
     };
 
     if !confirmed {
