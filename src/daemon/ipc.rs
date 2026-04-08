@@ -156,9 +156,9 @@ async fn dispatch(
                 Some(route) => {
                     #[cfg(unix)]
                     {
-                        use nix::sys::signal::{kill, Signal};
+                        use nix::sys::signal::{killpg, Signal};
                         use nix::unistd::Pid;
-                        kill(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
+                        killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
                     let _ = routes.remove(&hostname);
                     Response::ok_empty()

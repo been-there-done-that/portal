@@ -26,6 +26,8 @@ pub async fn spawn_child(
     let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
 
     let mut cmd = tokio::process::Command::new(program);
+    #[cfg(unix)]
+    cmd.process_group(0); // child gets its own process group (pgid = child pid)
     cmd.env("PORT", &port_str)
         .env("PORTAL_URL", format!("https://{hostname}"))
         .current_dir(cwd)
@@ -59,10 +61,10 @@ pub async fn stop_child(child: &mut tokio::process::Child) -> Result<()> {
     // Send SIGTERM
     #[cfg(unix)]
     {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::{killpg, Signal};
         use nix::unistd::Pid;
-
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        // Kill the entire process group (handles uv run → uvicorn grandchild case)
+        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
     }
 
     #[cfg(windows)]

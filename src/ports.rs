@@ -55,15 +55,12 @@ pub fn find_free_port(lo: u16, hi: u16) -> Result<u16> {
 pub async fn wait_for_port_free(port: u16, timeout: std::time::Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        // If connect fails, the port is free
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
-            .await
-            .is_err()
-        {
+        // Port is truly free when we can bind to it (not just when connect fails)
+        if std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
-            return; // Timeout — proceed anyway
+            return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }

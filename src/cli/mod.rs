@@ -378,8 +378,19 @@ async fn do_run(
 
     banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
 
-    child.wait().await?;
-
+    // Wait for child to exit, or intercept Ctrl+C to stop it gracefully.
+    tokio::select! {
+        _ = child.wait() => {},
+        _ = tokio::signal::ctrl_c() => {
+            let _ = crate::process::stop_child(&mut child).await;
+            // Deregister the route so the next `portal start` doesn't see a stale entry
+            if let Ok(mut s) = ipc_connect().await {
+                let _ = write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await;
+                let _: crate::proto::Response = read_frame(&mut s).await
+                    .unwrap_or(crate::proto::Response::ok_empty());
+            }
+        }
+    }
     Ok(())
 }
 
