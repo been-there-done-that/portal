@@ -11,7 +11,7 @@ pub fn is_known_runner(cmd: &str) -> bool {
     KNOWN_RUNNERS.contains(&cmd)
 }
 
-fn detect_package_manager(cwd: &Path) -> &'static str {
+pub(crate) fn detect_package_manager(cwd: &Path) -> &'static str {
     if cwd.join("pnpm-lock.yaml").exists() { return "pnpm"; }
     if cwd.join("bun.lockb").exists() || cwd.join("bun.lock").exists() { return "bun"; }
     if cwd.join("yarn.lock").exists() { return "yarn"; }
