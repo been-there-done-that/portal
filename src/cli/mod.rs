@@ -64,6 +64,17 @@ pub enum CliCommand {
     Inspect,
     /// Generate portal.toml for this project
     Init,
+    /// Generate shell completions for portal
+    Completion {
+        /// Shell to generate completions for (auto-detected if omitted)
+        shell: Option<clap_complete::Shell>,
+        /// Print to stdout instead of installing
+        #[arg(long, short = 'p')]
+        print: bool,
+        /// Override the default install directory
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -248,6 +259,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 std::process::Command::new("xdg-open").arg(url).spawn().ok();
             }
             println!("Opening {url}");
+        }
+
+        CliCommand::Completion { shell, print, path } => {
+            completion::run(shell, print, path)?;
         }
 
         CliCommand::Init => {

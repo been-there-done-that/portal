@@ -59,11 +59,81 @@ fn post_install_message(shell: Shell, path: &Path, is_omz: bool) {
 }
 
 pub fn run(
-    _shell: Option<Shell>,
-    _print: bool,
-    _path: Option<PathBuf>,
+    shell: Option<Shell>,
+    print: bool,
+    path: Option<PathBuf>,
 ) -> crate::error::Result<()> {
-    todo!()
+    use clap::CommandFactory;
+    use clap_complete::generate;
+    use std::io::{IsTerminal, Write};
+
+    // Resolve shell: explicit arg > $SHELL detection > error
+    let shell = match shell {
+        Some(s) => s,
+        None => match detect_shell() {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "Could not detect shell. Run: portal completion <bash|zsh|fish|powershell|elvish>"
+                );
+                std::process::exit(1);
+            }
+        },
+    };
+
+    // --print: dump to stdout and exit
+    if print {
+        let mut cmd = super::Cli::command();
+        generate(shell, &mut cmd, "portal", &mut std::io::stdout());
+        return Ok(());
+    }
+
+    // Install mode: resolve target path
+    let install_path = match path {
+        Some(dir) => {
+            let default = default_install_path(shell);
+            let filename = default.file_name().expect("default path always has filename");
+            dir.join(filename)
+        }
+        None => default_install_path(shell),
+    };
+
+    let shell_name = shell.to_string();
+    println!("Detected shell: {shell_name}");
+    print!("Install completion to {}? [Y/n] ", install_path.display());
+    std::io::stdout().flush()?;
+
+    // Confirm: auto-yes when stdin is not a TTY (piped/scripted usage)
+    let confirmed = if std::io::stdin().is_terminal() {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        matches!(input.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes")
+    } else {
+        true
+    };
+
+    if !confirmed {
+        println!(
+            "\nRun this to install manually:\n  portal completion {shell_name} --print > {}",
+            install_path.display()
+        );
+        return Ok(());
+    }
+
+    // Create parent directories
+    if let Some(parent) = install_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Generate and write
+    let mut cmd = super::Cli::command();
+    let mut buf = Vec::new();
+    generate(shell, &mut cmd, "portal", &mut buf);
+    std::fs::write(&install_path, &buf)?;
+
+    let omz = is_omz();
+    post_install_message(shell, &install_path, omz);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -173,5 +243,25 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Elvish);
         assert!(path.to_string_lossy().ends_with(".config/elvish/lib/portal.elv"));
+    }
+
+    #[test]
+    fn run_print_bash_produces_output() {
+        // Capture stdout by generating directly — tests the generate path
+        let mut cmd = <super::super::Cli as clap::CommandFactory>::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(Shell::Bash, &mut cmd, "portal", &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.is_empty());
+        assert!(output.contains("portal"));
+    }
+
+    #[test]
+    fn run_print_fish_produces_complete_command() {
+        let mut cmd = <super::super::Cli as clap::CommandFactory>::command();
+        let mut buf = Vec::new();
+        clap_complete::generate(Shell::Fish, &mut cmd, "portal", &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("complete") && output.contains("portal"));
     }
 }
