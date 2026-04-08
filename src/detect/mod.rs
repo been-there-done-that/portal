@@ -180,6 +180,7 @@ pub mod ruby;
 pub mod rust;
 pub mod php;
 pub mod storybook;
+pub mod docker_compose;
 
 // ─── PortalTomlDriver ────────────────────────────────────────────────────────
 
