@@ -71,8 +71,8 @@ pub enum CliCommand {
         /// Print to stdout instead of installing
         #[arg(long, short = 'p')]
         print: bool,
-        /// Override the default install directory
-        #[arg(long)]
+        /// Override the default install directory (filename is appended automatically)
+        #[arg(long, value_name = "DIR")]
         path: Option<std::path::PathBuf>,
     },
 }
