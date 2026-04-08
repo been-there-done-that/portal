@@ -114,6 +114,28 @@ async fn handle_connection(
     write_frame(&mut stream, &response).await.ok();
 }
 
+/// Collect hostnames of all user-registered routes (excludes internal `_.localhost`).
+fn user_hostnames(routes: &RouteStore) -> Vec<String> {
+    routes
+        .list()
+        .into_iter()
+        .filter(|r| r.hostname != "_.localhost")
+        .map(|r| r.hostname)
+        .collect()
+}
+
+/// Sync /etc/hosts with current user routes. Logs a warning on failure, never panics.
+fn sync_hosts(routes: &RouteStore) {
+    if !crate::hosts::should_sync() {
+        return;
+    }
+    let hostnames = user_hostnames(routes);
+    let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = crate::hosts::sync_hosts_file(&refs) {
+        tracing::warn!("hosts sync failed: {e}");
+    }
+}
+
 async fn dispatch(
     cmd: Command,
     routes: RouteStore,
@@ -161,6 +183,7 @@ async fn dispatch(
                         killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
                     let _ = routes.remove(&hostname);
+                    sync_hosts(&routes);
                     Response::ok_empty()
                 }
             }
@@ -168,6 +191,7 @@ async fn dispatch(
 
         Command::Rm { hostname } => {
             let _ = routes.remove(&hostname);
+            sync_hosts(&routes);
             Response::ok_empty()
         }
 
@@ -176,6 +200,9 @@ async fn dispatch(
             let pid = pid_path.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Err(e) = crate::hosts::clean_hosts_file() {
+                    tracing::warn!("hosts cleanup on shutdown failed: {e}");
+                }
                 let _ = std::fs::remove_file(&sock);
                 let _ = std::fs::remove_file(&pid);
                 std::process::exit(0);
@@ -220,10 +247,34 @@ async fn dispatch(
                 created_at: chrono::Utc::now(),
             };
             match routes.insert(route) {
-                Ok(_) => Response::ok_empty(),
+                Ok(_) => {
+                    sync_hosts(&routes);
+                    Response::ok_empty()
+                }
                 Err(e) => Response::err(e.to_string()),
             }
         }
+
+        // Note: explicit user command — bypasses PORTAL_SYNC_HOSTS opt-out intentionally.
+        Command::HostsSync => {
+            let hostnames = user_hostnames(&routes);
+            let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
+            match crate::hosts::sync_hosts_file(&refs) {
+                Ok(_) => {
+                    let entries: Vec<serde_json::Value> = refs
+                        .iter()
+                        .map(|h| serde_json::Value::String(format!("127.0.0.1 {h}")))
+                        .collect();
+                    Response::ok(serde_json::Value::Array(entries))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+
+        Command::HostsClean => match crate::hosts::clean_hosts_file() {
+            Ok(_) => Response::ok_empty(),
+            Err(e) => Response::err(e.to_string()),
+        },
 
         Command::Run { .. } => Response::err("use portal run from CLI"),
     }
@@ -231,6 +282,8 @@ async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn ls_hides_inspector_route() {
         let routes: Vec<String> = vec![
@@ -241,5 +294,36 @@ mod tests {
         let filtered: Vec<&String> = routes.iter().filter(|h| *h != "_.localhost").collect();
         assert_eq!(filtered.len(), 2);
         assert!(!filtered.iter().any(|h| *h == "_.localhost"));
+    }
+
+    #[test]
+    fn user_hostnames_excludes_inspector() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::routes::RouteStore::new(dir.path().join("routes.json")).unwrap();
+
+        // Insert a real user route
+        store.insert(crate::routes::Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).unwrap();
+
+        // Insert the internal inspector route
+        store.insert(crate::routes::Route {
+            hostname: "_.localhost".to_string(),
+            port: 9999,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: String::new(),
+            created_at: chrono::Utc::now(),
+        }).unwrap();
+
+        let result = user_hostnames(&store);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "myapp.localhost");
+        assert!(!result.contains(&"_.localhost".to_string()));
     }
 }

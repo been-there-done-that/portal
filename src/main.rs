@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod detect;
 mod error;
+mod hosts;
 mod inspector;
 mod pages;
 mod ports;

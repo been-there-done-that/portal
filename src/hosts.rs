@@ -1,0 +1,330 @@
+// src/hosts.rs
+
+pub(crate) const MARKER_START: &str = "# portless-start";
+pub(crate) const MARKER_END: &str = "# portless-end";
+
+/// Returns the path to the system hosts file.
+pub fn hosts_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        std::path::PathBuf::from(root)
+            .join("System32")
+            .join("drivers")
+            .join("etc")
+            .join("hosts")
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from("/etc/hosts")
+    }
+}
+
+/// Returns false only when PORTAL_SYNC_HOSTS is "0", "false", "no", or "off". True otherwise.
+pub fn should_sync() -> bool {
+    !matches!(
+        std::env::var("PORTAL_SYNC_HOSTS").as_deref(),
+        Ok("0") | Ok("false") | Ok("no") | Ok("off")
+    )
+}
+
+/// Build the portless-managed block for the given hostnames.
+/// Returns an empty string when hostnames is empty.
+pub fn build_block(hostnames: &[&str]) -> String {
+    if hostnames.is_empty() {
+        return String::new();
+    }
+    let entries = hostnames
+        .iter()
+        .map(|h| format!("127.0.0.1 {h}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{MARKER_START}\n{entries}\n{MARKER_END}")
+}
+
+/// Strip the portless-managed block from hosts file content.
+/// Collapses 3+ consecutive blank lines to at most 1, trims trailing whitespace,
+/// and ensures a single trailing newline.
+pub fn remove_block(content: &str) -> String {
+    let start_idx = content.find(MARKER_START);
+    let end_idx = content.find(MARKER_END);
+    let (s, e) = match (start_idx, end_idx) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return content.to_string(),
+    };
+    let before = &content[..s];
+    let after = &content[e + MARKER_END.len()..];
+    let combined = format!("{before}{after}");
+    // Collapse 3+ consecutive blank lines to at most 1 blank line (2 newlines)
+    let mut out = String::new();
+    let mut blank_run = 0usize;
+    for line in combined.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run < 2 {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let trimmed = out.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{trimmed}\n")
+}
+
+/// Extract lines from within the portless-managed block.
+/// Inner lines have leading/trailing whitespace trimmed.
+/// Returns empty vec if no managed block exists.
+pub fn extract_managed(content: &str) -> Vec<String> {
+    let start_idx = content.find(MARKER_START);
+    let end_idx = content.find(MARKER_END);
+    let (s, e) = match (start_idx, end_idx) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => return vec![],
+    };
+    content[s + MARKER_START.len()..e]
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Core sync logic — writes to `path` instead of the real hosts file.
+/// This separation allows tests to use a temp file.
+pub fn sync_hosts_file_at(hostnames: &[&str], path: &std::path::Path) -> crate::error::Result<()> {
+    let tmp_path = path.with_extension("tmp");
+
+    // Preserve existing file permissions before overwriting
+    #[cfg(unix)]
+    let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
+
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let cleaned = remove_block(&content);
+
+    let new_content = if hostnames.is_empty() {
+        cleaned
+    } else {
+        let block = build_block(hostnames);
+        format!("{}\n{}\n", cleaned.trim_end(), block)
+    };
+
+    std::fs::write(&tmp_path, &new_content)?;
+
+    // Restore permissions on the temp file before atomic rename
+    #[cfg(unix)]
+    if let Some(perms) = existing_perms {
+        let _ = std::fs::set_permissions(&tmp_path, perms);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path); // best-effort cleanup
+        return Err(e.into());
+    }
+
+    Ok(())
+}
+
+/// Sync the real /etc/hosts with the given hostnames, then flush the macOS DNS cache.
+pub fn sync_hosts_file(hostnames: &[&str]) -> crate::error::Result<()> {
+    sync_hosts_file_at(hostnames, &hosts_path())?;
+
+    #[cfg(target_os = "macos")]
+    flush_dns_cache();
+
+    Ok(())
+}
+
+/// Remove the portless-managed block from /etc/hosts.
+pub fn clean_hosts_file() -> crate::error::Result<()> {
+    sync_hosts_file(&[])
+}
+
+/// Fire-and-forget DNS cache flush on macOS. Failures are swallowed.
+#[cfg(target_os = "macos")]
+fn flush_dns_cache() {
+    let _ = std::process::Command::new("dscacheutil")
+        .arg("-flushcache")
+        .output();
+    let _ = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponder"])
+        .output();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_path_is_not_empty() {
+        assert!(!hosts_path().as_os_str().is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn hosts_path_unix() {
+        assert_eq!(hosts_path(), std::path::PathBuf::from("/etc/hosts"));
+    }
+
+    #[test]
+    fn should_sync_env_var_opt_out() {
+        // Test each opt-out value sequentially to avoid parallel env var conflicts
+        let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
+
+        for value in &["0", "false", "no", "off"] {
+            unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", value); }
+            assert!(!should_sync(), "expected false for PORTAL_SYNC_HOSTS={value}");
+        }
+
+        // Unset → true
+        unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); }
+        assert!(should_sync());
+
+        // Restore original state
+        match original {
+            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
+            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+        }
+    }
+
+    #[test]
+    fn build_block_empty() {
+        assert_eq!(build_block(&[]), "");
+    }
+
+    #[test]
+    fn build_block_single() {
+        let block = build_block(&["myapp.localhost"]);
+        assert!(block.starts_with("# portless-start\n"));
+        assert!(block.contains("127.0.0.1 myapp.localhost"));
+        assert!(block.ends_with("\n# portless-end"));
+    }
+
+    #[test]
+    fn build_block_multiple() {
+        let block = build_block(&["myapp.localhost", "api.localhost"]);
+        assert!(block.contains("127.0.0.1 myapp.localhost\n127.0.0.1 api.localhost"));
+    }
+
+    #[test]
+    fn remove_block_no_markers() {
+        let content = "127.0.0.1 localhost\n";
+        assert_eq!(remove_block(content), content);
+    }
+
+    #[test]
+    fn remove_block_strips_managed_block() {
+        let content = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
+        let result = remove_block(content);
+        assert!(!result.contains("portless-start"));
+        assert!(!result.contains("myapp.localhost"));
+        assert!(result.contains("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn remove_block_normalises_blank_lines() {
+        let content = "a\n\n\n\n# portless-start\nentry\n# portless-end\n";
+        let result = remove_block(content);
+        assert!(!result.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn extract_managed_no_block() {
+        assert_eq!(extract_managed("127.0.0.1 localhost\n"), vec![] as Vec<String>);
+    }
+
+    #[test]
+    fn extract_managed_returns_inner_lines() {
+        let block = build_block(&["myapp.localhost", "api.localhost"]);
+        let lines = extract_managed(&block);
+        assert_eq!(lines, vec!["127.0.0.1 myapp.localhost", "127.0.0.1 api.localhost"]);
+    }
+
+    #[test]
+    fn round_trip_build_extract() {
+        let hostnames = &["myapp.localhost", "api.localhost", "admin.local"];
+        let block = build_block(hostnames);
+        let content = format!("127.0.0.1 localhost\n\n{block}\n");
+        let extracted = extract_managed(&content);
+        let recovered: Vec<&str> = extracted
+            .iter()
+            .map(|l| l.splitn(2, ' ').nth(1).unwrap_or(""))
+            .collect();
+        assert_eq!(recovered, hostnames.to_vec());
+    }
+
+    #[test]
+    fn remove_then_rebuild_is_idempotent() {
+        let hostnames = &["myapp.localhost"];
+        let original = "127.0.0.1 localhost\n";
+        let with_block = format!("{original}\n{}\n", build_block(hostnames));
+        let cleaned = remove_block(&with_block);
+        let rebuilt = format!("{}\n{}\n", cleaned.trim_end(), build_block(hostnames));
+        let cleaned2 = remove_block(&rebuilt);
+        assert_eq!(cleaned, cleaned2);
+    }
+
+    #[test]
+    fn sync_creates_managed_block_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+        sync_hosts_file_at(&["myapp.localhost"], &hosts_file).unwrap();
+
+        let content = std::fs::read_to_string(&hosts_file).unwrap();
+        assert!(content.contains("# portless-start"));
+        assert!(content.contains("127.0.0.1 myapp.localhost"));
+        assert!(content.contains("# portless-end"));
+        assert!(content.contains("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn sync_replaces_existing_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        let initial = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 oldapp.localhost\n# portless-end\n";
+        std::fs::write(&hosts_file, initial).unwrap();
+
+        sync_hosts_file_at(&["newapp.localhost"], &hosts_file).unwrap();
+
+        let content = std::fs::read_to_string(&hosts_file).unwrap();
+        assert!(content.contains("127.0.0.1 newapp.localhost"));
+        assert!(!content.contains("oldapp.localhost"));
+    }
+
+    #[test]
+    fn sync_empty_removes_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        let initial = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
+        std::fs::write(&hosts_file, initial).unwrap();
+
+        sync_hosts_file_at(&[], &hosts_file).unwrap();
+
+        let content = std::fs::read_to_string(&hosts_file).unwrap();
+        assert!(!content.contains("portless-start"));
+        assert!(!content.contains("myapp.localhost"));
+        assert!(content.contains("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn sync_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_file = dir.path().join("hosts");
+        std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+        let hostnames = &["myapp.localhost", "api.localhost"];
+        sync_hosts_file_at(hostnames, &hosts_file).unwrap();
+        let content1 = std::fs::read_to_string(&hosts_file).unwrap();
+
+        sync_hosts_file_at(hostnames, &hosts_file).unwrap();
+        let content2 = std::fs::read_to_string(&hosts_file).unwrap();
+
+        assert_eq!(content1, content2);
+    }
+}
