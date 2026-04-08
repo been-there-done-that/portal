@@ -270,26 +270,83 @@ pub async fn handle_https_request(
     }
 }
 
-/// Handle a WebSocket upgrade request by proxying bidirectionally.
-async fn handle_websocket(
-    req: Request<Incoming>,
+/// Handle a WebSocket upgrade by forwarding the full HTTP upgrade request to upstream,
+/// verifying the 101 response, then bridging connections bidirectionally.
+/// Host header is rewritten to localhost:{route_port} (required by Bun/Next.js HMR).
+async fn handle_websocket<B>(
+    req: Request<B>,
     route_port: u16,
-) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
+) -> Result<Response<BoxBodyType>, std::convert::Infallible>
+where
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     // 1. Connect to upstream
-    let upstream_addr = format!("127.0.0.1:{}", route_port);
-    let upstream = match TcpStream::connect(&upstream_addr).await {
+    let upstream_addr = format!("127.0.0.1:{route_port}");
+    let mut upstream = match TcpStream::connect(&upstream_addr).await {
         Ok(s) => s,
         Err(_) => {
-            let resp = Response::builder()
+            return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .header("content-type", "text/plain")
                 .body(full_body("502 Bad Gateway: upstream connection failed"))
-                .unwrap();
-            return Ok(resp);
+                .unwrap());
         }
     };
 
-    // 3. Build 101 Switching Protocols response
+    // 2. Build and forward HTTP upgrade request with Host rewritten
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let method = req.method().as_str().to_string();
+
+    let mut upgrade_req = format!("{method} {path} HTTP/1.1\r\n");
+    upgrade_req.push_str(&format!("host: localhost:{route_port}\r\n"));
+    for (k, v) in req.headers() {
+        if k == http::header::HOST {
+            continue; // already wrote rewritten Host above
+        }
+        if let Ok(v_str) = v.to_str() {
+            upgrade_req.push_str(&format!("{}: {v_str}\r\n", k.as_str()));
+        }
+    }
+    upgrade_req.push_str("\r\n");
+
+    if upstream.write_all(upgrade_req.as_bytes()).await.is_err() {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header("content-type", "text/plain")
+            .body(full_body("502 Bad Gateway: upstream write failed"))
+            .unwrap());
+    }
+
+    // 3. Read upstream's 101 response
+    let mut buf = vec![0u8; 1024];
+    let n = match upstream.read(&mut buf).await {
+        Ok(n) if n > 0 => n,
+        _ => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("content-type", "text/plain")
+                .body(full_body("502 Bad Gateway: upstream did not respond to WebSocket upgrade"))
+                .unwrap());
+        }
+    };
+
+    let response_head = String::from_utf8_lossy(&buf[..n]);
+    if !response_head.contains("101") {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header("content-type", "text/plain")
+            .body(full_body("502 Bad Gateway: upstream rejected WebSocket upgrade"))
+            .unwrap());
+    }
+
+    // 4. Return 101 to client and bridge the two connections
     let resp = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(http::header::UPGRADE, "websocket")
@@ -297,16 +354,14 @@ async fn handle_websocket(
         .body(full_body(""))
         .unwrap();
 
-    // 4. Spawn task to perform bidirectional copy after upgrade
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let mut client_io = hyper_util::rt::TokioIo::new(upgraded);
-                let mut upstream_io = upstream;
-                let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await;
+                let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await;
             }
             Err(e) => {
-                tracing::warn!("WebSocket upgrade failed: {}", e);
+                tracing::warn!("WebSocket upgrade failed: {e}");
             }
         }
     });
@@ -414,5 +469,49 @@ mod tests {
     #[test]
     fn extract_host_returns_empty_on_none() {
         assert_eq!(extract_host(None), "");
+    }
+
+    #[tokio::test]
+    async fn websocket_host_header_is_rewritten() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Minimal upstream that expects an HTTP upgrade request and responds with 101
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 1024];
+                if let Ok(n) = stream.read(&mut buf).await {
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    // Verify Host was rewritten to localhost:{port}
+                    assert!(
+                        req_str.contains(&format!("host: localhost:{port}")),
+                        "Host header not rewritten. Got:\n{req_str}"
+                    );
+                    stream.write_all(
+                        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+                    ).await.ok();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Build a WebSocket upgrade request — Host is myapp.localhost (will be rewritten)
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/_next/webpack-hmr")
+            .header(http::header::HOST, "myapp.localhost")
+            .header(http::header::UPGRADE, "websocket")
+            .header(http::header::CONNECTION, "Upgrade")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("Sec-WebSocket-Version", "13")
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+
+        let resp = handle_websocket(req, port).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::SWITCHING_PROTOCOLS);
     }
 }
