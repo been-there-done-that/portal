@@ -87,6 +87,24 @@ pub fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true if the request prefers HTML responses (i.e. a browser navigation).
+fn wants_html(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false)
+}
+
+/// Short plain-text error for API callers (no Accept: text/html).
+fn plain_error(status: http::StatusCode, msg: &str) -> Response<BoxBodyType> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/plain")
+        .body(full_body(format!("{} {msg}", status.as_u16())))
+        .unwrap()
+}
+
 /// Main proxy handler for HTTPS requests.
 pub async fn handle_https_request(
     req: Request<Incoming>,
@@ -94,6 +112,8 @@ pub async fn handle_https_request(
     inspector: Option<crate::inspector::InspectorSender>,
 ) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
     let start = std::time::Instant::now();
+
+    let accept_html = wants_html(req.headers());
 
     let hops: u8 = req
         .headers()
@@ -113,21 +133,29 @@ pub async fn handle_https_request(
         .to_string();
 
     if hops >= MAX_HOPS {
-        return Ok(Response::builder()
-            .status(StatusCode::LOOP_DETECTED)
-            .header("content-type", "text/html")
-            .body(full_body(crate::pages::page_508(&hostname)))
-            .unwrap());
+        return Ok(if accept_html {
+            Response::builder()
+                .status(StatusCode::LOOP_DETECTED)
+                .header("content-type", "text/html")
+                .body(full_body(crate::pages::page_508(&hostname)))
+                .unwrap()
+        } else {
+            plain_error(StatusCode::LOOP_DETECTED, &format!("loop detected proxying {hostname}"))
+        });
     }
 
     let route = match routes.get(&hostname) {
         Some(r) => r,
         None => {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header("content-type", "text/html")
-                .body(full_body(crate::pages::page_404(&hostname)))
-                .unwrap());
+            return Ok(if accept_html {
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("content-type", "text/html")
+                    .body(full_body(crate::pages::page_404(&hostname)))
+                    .unwrap()
+            } else {
+                plain_error(StatusCode::NOT_FOUND, &format!("no route registered for {hostname}"))
+            });
         }
     };
 
@@ -155,11 +183,15 @@ pub async fn handle_https_request(
     let req_body_bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),
         Err(_) => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("content-type", "text/html")
-                .body(full_body(crate::pages::page_502(&hostname)))
-                .unwrap());
+            return Ok(if accept_html {
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .header("content-type", "text/html")
+                    .body(full_body(crate::pages::page_502(&hostname)))
+                    .unwrap()
+            } else {
+                plain_error(StatusCode::BAD_GATEWAY, &format!("{hostname} → port {port} unreachable"))
+            });
         }
     };
 
@@ -214,11 +246,15 @@ pub async fn handle_https_request(
 
             Ok(Response::from_parts(resp_parts, full_body(resp_bytes)))
         }
-        Err(_) => Ok(Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .header("content-type", "text/html")
-            .body(full_body(crate::pages::page_502(&hostname)))
-            .unwrap()),
+        Err(_) => Ok(if accept_html {
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("content-type", "text/html")
+                .body(full_body(crate::pages::page_502(&hostname)))
+                .unwrap()
+        } else {
+            plain_error(StatusCode::BAD_GATEWAY, &format!("{hostname} → port {port} unreachable"))
+        }),
     }
 }
 
@@ -314,6 +350,29 @@ mod tests {
             "Expected https:// in response: {}",
             response
         );
+    }
+
+    #[test]
+    fn wants_html_returns_true_for_browser_accept() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".parse().unwrap(),
+        );
+        assert!(wants_html(&headers));
+    }
+
+    #[test]
+    fn wants_html_returns_false_for_json_accept() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::ACCEPT, "application/json".parse().unwrap());
+        assert!(!wants_html(&headers));
+    }
+
+    #[test]
+    fn wants_html_returns_false_when_no_accept_header() {
+        let headers = http::HeaderMap::new();
+        assert!(!wants_html(&headers));
     }
 
     #[test]
