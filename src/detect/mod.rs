@@ -48,17 +48,16 @@ impl DriverRegistry {
 // ─── Utility functions ───────────────────────────────────────────────────────
 
 pub fn sanitize_hostname(s: &str) -> String {
-    let lower = s.to_lowercase();
     let mut result = String::new();
-    for c in lower.chars() {
+    let mut prev_dash = false;
+    for c in s.to_lowercase().chars() {
         if c.is_ascii_alphanumeric() {
             result.push(c);
-        } else {
+            prev_dash = false;
+        } else if !prev_dash {
             result.push('-');
+            prev_dash = true;
         }
-    }
-    while result.contains("--") {
-        result = result.replace("--", "-");
     }
     result.trim_matches('-').to_string()
 }
@@ -97,7 +96,12 @@ pub fn resolve_hostname(cwd: &Path, override_name: Option<&str>, tld: &str) -> S
             if let Ok(contents) = fs::read_to_string(&git_path) {
                 if let Some(gitdir_line) = contents.lines().find(|l| l.starts_with("gitdir:")) {
                     let gitdir_path = gitdir_line.strip_prefix("gitdir:").map(|s| s.trim()).unwrap_or("");
-                    let head_path = Path::new(gitdir_path).join("HEAD");
+                    let gitdir_abs = if Path::new(gitdir_path).is_absolute() {
+                        std::path::PathBuf::from(gitdir_path)
+                    } else {
+                        cwd.join(gitdir_path)
+                    };
+                    let head_path = gitdir_abs.join("HEAD");
                     if let Ok(head_contents) = fs::read_to_string(&head_path) {
                         let branch = head_contents.trim()
                             .strip_prefix("ref: refs/heads/")
