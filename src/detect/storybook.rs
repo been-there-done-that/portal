@@ -23,10 +23,12 @@ impl LanguageDriver for StorybookDriver {
                 return true;
             }
         }
-        // Signal 3: devDependencies contain any @storybook/ package
-        if let Some(dev_deps) = json.get("devDependencies").and_then(|v| v.as_object()) {
-            if dev_deps.keys().any(|k| k.starts_with("@storybook/")) {
-                return true;
+        // Signal 3: dependencies or devDependencies contain any @storybook/ package
+        for deps_key in &["devDependencies", "dependencies"] {
+            if let Some(deps) = json.get(deps_key).and_then(|v| v.as_object()) {
+                if deps.keys().any(|k| k.starts_with("@storybook/")) {
+                    return true;
+                }
             }
         }
         false
@@ -60,7 +62,7 @@ impl LanguageDriver for StorybookDriver {
                 }
             }
         }
-        Some("storybook dev".to_string())
+        None
     }
 
     fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
@@ -106,6 +108,16 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"devDependencies":{"@storybook/react":"^7.0.0"}}"#,
+        ).unwrap();
+        assert!(StorybookDriver.detect(tmp.path()));
+    }
+
+    #[test]
+    fn detects_via_storybook_regular_dependency() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"dependencies":{"@storybook/react":"^6.5.0"}}"#,
         ).unwrap();
         assert!(StorybookDriver.detect(tmp.path()));
     }
@@ -183,12 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn start_command_falls_back_to_storybook_dev() {
+    fn start_command_returns_none_when_no_script() {
         let tmp = TempDir::new().unwrap();
-        assert_eq!(
-            StorybookDriver.start_command(tmp.path()),
-            Some("storybook dev".to_string()),
-        );
+        assert_eq!(StorybookDriver.start_command(tmp.path()), None);
     }
 
     #[test]
