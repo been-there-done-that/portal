@@ -45,6 +45,11 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: CertAction,
     },
+    /// Manage /etc/hosts entries for portless routes
+    Hosts {
+        #[command(subcommand)]
+        action: HostsAction,
+    },
     /// Show effective configuration
     Config,
     /// Shut down the daemon
@@ -59,6 +64,14 @@ pub enum CertAction {
     Install,
     /// Regenerate the local CA and reinstall
     Reset,
+}
+
+#[derive(Subcommand)]
+pub enum HostsAction {
+    /// Force-rewrite the portless block in /etc/hosts from current routes
+    Sync,
+    /// Remove the portless block from /etc/hosts
+    Clean,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -173,6 +186,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             write_frame(&mut stream, &cmd).await?;
             let resp = read_frame(&mut stream).await?;
             output::print_response(&resp);
+        }
+
+        CliCommand::Hosts { action } => {
+            let (cmd, is_sync) = match action {
+                HostsAction::Sync => (Command::HostsSync, true),
+                HostsAction::Clean => (Command::HostsClean, false),
+            };
+            let mut stream = ipc_connect().await?;
+            write_frame(&mut stream, &cmd).await?;
+            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            if is_sync {
+                output::print_hosts_sync(&resp);
+            } else {
+                output::print_hosts_clean(&resp);
+            }
         }
 
         CliCommand::Config => {

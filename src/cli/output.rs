@@ -145,3 +145,36 @@ pub fn print_status(status: &Response, routes: &Response) {
         println!("{}", style("daemon running, no status data available").dim());
     }
 }
+
+/// Print the result of `portless hosts sync`.
+pub fn print_hosts_sync(resp: &crate::proto::Response) {
+    if !resp.ok {
+        eprintln!(
+            "error: {}",
+            resp.error.as_deref().unwrap_or("unknown error")
+        );
+        return;
+    }
+    match &resp.data {
+        Some(serde_json::Value::Array(entries)) if !entries.is_empty() => {
+            for entry in entries {
+                if let serde_json::Value::String(s) = entry {
+                    println!("  {s}");
+                }
+            }
+        }
+        _ => println!("no active routes"),
+    }
+}
+
+/// Print the result of `portless hosts clean`.
+pub fn print_hosts_clean(resp: &crate::proto::Response) {
+    if !resp.ok {
+        eprintln!(
+            "error: {}",
+            resp.error.as_deref().unwrap_or("unknown error")
+        );
+        return;
+    }
+    println!("hosts file cleaned");
+}
