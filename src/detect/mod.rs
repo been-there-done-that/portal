@@ -170,15 +170,6 @@ fn read_go_module_name(cwd: &Path) -> Option<String> {
 
 pub use node::{resolve_run_args, KNOWN_RUNNERS, is_known_runner};
 
-// ─── Temporary re-exports from legacy module until Task 11 rewrites cli/mod.rs ───
-
-pub use crate::detect_legacy::{
-    extra_args_for_port,
-    Framework,
-    pick_dev_script,
-    detect_package_manager,
-};
-
 // ─── Sub-modules ─────────────────────────────────────────────────────────────
 
 pub mod node;

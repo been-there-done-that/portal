@@ -70,41 +70,33 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Start => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
+            let registry = crate::detect::DriverRegistry::new(&config);
 
-            let pkg_path = cwd.join("package.json");
-            if !pkg_path.exists() {
-                eprintln!(
-                    "error: no package.json found in {}. Use 'portal run <command>' to run an arbitrary command.",
-                    cwd.display()
-                );
-                std::process::exit(1);
-            }
-
-            let contents = std::fs::read_to_string(&pkg_path)?;
-            let json: serde_json::Value = match serde_json::from_str(&contents) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("error: package.json is not valid JSON: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            if json.get("scripts").and_then(|s| s.as_object()).is_none() {
-                eprintln!("error: package.json has no \"scripts\" field. Add a \"dev\" script or use 'portal run <command>'.");
-                std::process::exit(1);
-            }
-            let script = match crate::detect::pick_dev_script(&json) {
-                Some(s) => s,
+            let driver = match registry.detect(&cwd) {
+                Some(d) => d,
                 None => {
-                    eprintln!("error: package.json \"scripts\" is empty. Add a \"dev\" script or use 'portal run <command>'.");
+                    eprintln!("No supported project detected. Run `portal init` to set up this project.");
                     std::process::exit(1);
                 }
             };
 
-            let pm = crate::detect::detect_package_manager(&cwd);
-            let args = vec![pm.to_string(), "run".to_string(), script];
+            let raw_cmd = match driver.start_command(&cwd) {
+                Some(cmd) => cmd,
+                None => {
+                    eprintln!("Detected {} but couldn't determine a start command. Run `portal init`.", driver.name());
+                    std::process::exit(1);
+                }
+            };
 
-            do_run(cwd, config, args, None, None).await?;
+            let hostname_override = config.project.name.clone()
+                .or_else(|| driver.project_name(&cwd));
+
+            let args: Vec<String> = raw_cmd
+                .split_whitespace()
+                .map(String::from)
+                .collect();
+
+            do_run(cwd, config, args, hostname_override, None, true).await?;
         }
 
         CliCommand::Ls => {
@@ -205,7 +197,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
-            do_run(cwd, config, resolved_args, hostname, port).await?;
+            do_run(cwd, config, resolved_args, hostname, port, false).await?;
         }
 
         CliCommand::Inspect => {
@@ -232,6 +224,7 @@ async fn do_run(
     args: Vec<String>,
     hostname_override: Option<String>,
     port_override: Option<u16>,
+    use_full_registry: bool,
 ) -> Result<()> {
     let mut setup = banner::SetupPrinter::new();
     ensure_daemon_running(&config, &mut setup).await?;
@@ -287,9 +280,20 @@ async fn do_run(
         )?
     };
 
+    let injection = {
+        let registry = crate::detect::DriverRegistry::new(&config);
+        let driver = if use_full_registry {
+            registry.detect(&cwd)
+        } else {
+            registry.detect_language(&cwd)
+        };
+        driver
+            .map(|d| d.port_injection(&cwd, port))
+            .unwrap_or(crate::detect::PortInjection::EnvOnly)
+    };
+
     let my_pid = std::process::id();
-    let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname,
-        crate::detect::PortInjection::EnvOnly).await?;
+    let mut child = crate::process::spawn_child(&cwd, &args, port, &hostname, injection).await?;
 
     // Register the route in the daemon's live in-memory store via IPC
     let child_pid = child.id().unwrap_or(my_pid);
