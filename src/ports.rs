@@ -15,6 +15,22 @@ pub fn is_browser_blocked(port: u16) -> bool {
     BLOCKED_PORTS.contains(&port)
 }
 
+/// Validate an explicitly provided app port.
+/// Returns `Err(InvalidPort)` if the port is privileged (< 1024) or browser-blocked.
+pub fn validate_app_port(port: u16) -> Result<()> {
+    if port < 1024 {
+        return Err(crate::error::Error::InvalidPort(format!(
+            "port {port} is a privileged port (< 1024)"
+        )));
+    }
+    if is_browser_blocked(port) {
+        return Err(crate::error::Error::InvalidPort(format!(
+            "port {port} is blocked by browsers — see https://fetch.spec.whatwg.org/#bad-port"
+        )));
+    }
+    Ok(())
+}
+
 /// Find a free port in the range [lo, hi] (inclusive).
 /// Skips browser-blocked ports and ports < 1024.
 /// Returns Error::NoFreePort if no port is available.
@@ -117,6 +133,44 @@ mod tests {
         assert!(is_browser_blocked(6000));
         // Port 4000 should not be blocked
         assert!(!is_browser_blocked(4000));
+    }
+
+    #[test]
+    fn validate_rejects_privileged_port() {
+        let err = validate_app_port(80).unwrap_err();
+        assert!(err.to_string().contains("privileged"));
+    }
+
+    #[test]
+    fn validate_rejects_privileged_boundary() {
+        let err = validate_app_port(1023).unwrap_err();
+        assert!(err.to_string().contains("privileged"));
+    }
+
+    #[test]
+    fn validate_accepts_port_1024() {
+        assert!(validate_app_port(1024).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_browser_blocked_port_6000() {
+        let err = validate_app_port(6000).unwrap_err();
+        assert!(err.to_string().contains("blocked"));
+    }
+
+    #[test]
+    fn validate_rejects_browser_blocked_irc_ports() {
+        for port in [6665u16, 6666, 6667, 6668, 6669] {
+            let err = validate_app_port(port).unwrap_err();
+            assert!(err.to_string().contains("blocked"), "port {port} should be blocked");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_normal_port() {
+        assert!(validate_app_port(4000).is_ok());
+        assert!(validate_app_port(3000).is_ok());
+        assert!(validate_app_port(8080).is_ok());
     }
 
     #[tokio::test]

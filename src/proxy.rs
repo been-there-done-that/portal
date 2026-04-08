@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 
 pub const HOP_HEADER: &str = "x-portal-hops";
 pub const MAX_HOPS: u8 = 5;
+pub const PORTAL_PORT_HEADER: &str = "x-portal-port";
 
 pub type BoxBodyType = BoxBody<Bytes, hyper::Error>;
 
@@ -37,7 +38,7 @@ pub async fn peek_first_byte(stream: &TcpStream) -> std::io::Result<u8> {
 }
 
 /// Listen on port 80 and redirect all HTTP traffic to HTTPS.
-pub async fn serve_http_redirect(listener: tokio::net::TcpListener, https_port: u16) {
+pub async fn serve_http_redirect(listener: tokio::net::TcpListener, http_port: u16, https_port: u16) {
     loop {
         let (mut stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -69,8 +70,8 @@ pub async fn serve_http_redirect(listener: tokio::net::TcpListener, https_port: 
             };
 
             let response = format!(
-                "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                location
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\n{}: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                location, PORTAL_PORT_HEADER, http_port
             );
 
             let _ = stream.write_all(response.as_bytes()).await;
@@ -420,7 +421,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         // Spawn the redirect server
-        tokio::spawn(serve_http_redirect(listener, 443));
+        tokio::spawn(serve_http_redirect(listener, port, 443));
 
         // Give the server a moment to start
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -444,6 +445,67 @@ mod tests {
         assert!(
             response.contains("https://"),
             "Expected https:// in response: {}",
+            response
+        );
+    }
+
+    #[tokio::test]
+    async fn http_redirect_includes_portal_port_header() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(serve_http_redirect(listener, port, 443));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let request = "GET / HTTP/1.1\r\nHost: myapp.localhost\r\nConnection: close\r\n\r\n";
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+
+        assert!(
+            response.to_lowercase().contains("x-portal-port:"),
+            "Expected x-portal-port header in response: {}",
+            response
+        );
+    }
+
+    #[tokio::test]
+    async fn http_redirect_portal_port_matches_listen_port() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(serve_http_redirect(listener, http_port, 8443));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", http_port))
+            .await
+            .unwrap();
+        let request = "GET / HTTP/1.1\r\nHost: myapp.localhost\r\nConnection: close\r\n\r\n";
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+
+        let expected_header = format!("x-portal-port: {}", http_port);
+        assert!(
+            response.to_lowercase().contains(&expected_header),
+            "Expected '{}' in response: {}",
+            expected_header,
+            response
+        );
+        assert!(
+            !response.to_lowercase().contains("x-portal-port: 8443"),
+            "Header should NOT contain the https port: {}",
             response
         );
     }

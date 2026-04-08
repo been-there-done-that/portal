@@ -31,6 +31,9 @@ pub enum Error {
 
     #[error("IPC error: {0}")]
     Ipc(String),
+
+    #[error("Invalid port: {0}")]
+    InvalidPort(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

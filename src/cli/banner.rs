@@ -30,6 +30,38 @@ pub fn print_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
     );
 }
 
+/// Print the TCP service startup banner after the child process is spawned.
+///
+/// ```text
+///   portal  v1.0.0  ·  ● running
+///
+///   redis.localhost  [TCP]
+///   └─ localhost:4001  ·  pid 99999
+/// ```
+pub fn print_tcp_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
+    let version = env!("CARGO_PKG_VERSION");
+    let badge = style(" portal ").bold().white().on_blue();
+    let ver = style(format!("v{version}")).dim();
+    let status_dot = if replaced {
+        style("● replaced").yellow().to_string()
+    } else {
+        style("● running").green().to_string()
+    };
+    eprintln!("  {badge}  {ver}  ·  {status_dot}");
+    eprintln!();
+    eprintln!(
+        "  {}  {}",
+        style(hostname).bold().white(),
+        style("[TCP]").cyan()
+    );
+    eprintln!(
+        "  {}{}  ·  {}",
+        style("└─ localhost:").dim(),
+        style(port.to_string()).red(),
+        style(format!("pid {pid}")).dim(),
+    );
+}
+
 /// Manages animated setup steps printed before the first run of a project.
 ///
 /// Steps are shown as a tree with `indicatif` spinners:
@@ -125,5 +157,15 @@ mod tests {
         setup.plain_step("this should be silent");
         let _pb = setup.begin_step("daemon", "starting…");
         setup.done(); // should not print anything
+    }
+
+    #[test]
+    fn print_tcp_banner_does_not_panic() {
+        print_tcp_banner("redis.localhost", 4001, 99999, false);
+    }
+
+    #[test]
+    fn print_tcp_banner_replaced_does_not_panic() {
+        print_tcp_banner("redis.localhost", 4001, 99999, true);
     }
 }

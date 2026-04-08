@@ -35,6 +35,9 @@ pub enum CliCommand {
         port: Option<u16>,
         #[arg(long, short = 'q', help = "Suppress startup banner and running output")]
         quiet: bool,
+        /// Treat as a TCP service (skip HTTPS proxy; for databases, caches, etc.)
+        #[arg(long)]
+        tcp: bool,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -128,7 +131,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .map(String::from)
                 .collect();
 
-            do_run(cwd, config, args, hostname_override, None, true, quiet).await?;
+            do_run(cwd, config, args, hostname_override, None, true, quiet, false).await?;
         }
 
         CliCommand::Ls => {
@@ -240,12 +243,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             hostname,
             port,
             quiet,
+            tcp,
             args,
         } => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
-            do_run(cwd, config, resolved_args, hostname, port, false, quiet).await?;
+            do_run(cwd, config, resolved_args, hostname, port, false, quiet, tcp).await?;
         }
 
         CliCommand::Inspect => {
@@ -339,6 +343,7 @@ async fn do_run(
     port_override: Option<u16>,
     use_full_registry: bool,
     quiet: bool,
+    tcp: bool,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -346,7 +351,9 @@ async fn do_run(
         banner::SetupPrinter::new()
     };
     ensure_daemon_running(&config, &mut setup).await?;
-    ensure_cert_trusted(&mut setup).await?;
+    if !tcp {
+        ensure_cert_trusted(&mut setup).await?;
+    }
     setup.done();
 
     let hostname =
@@ -413,6 +420,7 @@ async fn do_run(
     //   3. Existing route           → stop old, reuse its port
     //   4. No existing route        → find a free port
     let port = if let Some(explicit_port) = port_override {
+        crate::ports::validate_app_port(explicit_port)?;
         if let Some(_old_port) = reuse_port {
             let mut s = ipc_connect().await?;
             write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
@@ -454,16 +462,18 @@ async fn do_run(
     let port_env_name = config.project.port_env.as_deref().unwrap_or("PORT");
     let mut extra_env: Vec<(String, String)> = vec![
         (port_env_name.to_string(), port.to_string()),
-        ("PORTAL_URL".to_string(), format!("https://{hostname}")),
     ];
-    // Inject NODE_EXTRA_CA_CERTS so Node.js child processes trust our local CA
-    if config.proxy.https {
-        let ca_path = crate::config::dirs_for_state().join("ca.pem");
-        if ca_path.exists() {
-            extra_env.push((
-                "NODE_EXTRA_CA_CERTS".to_string(),
-                ca_path.to_string_lossy().into_owned(),
-            ));
+    if !tcp {
+        extra_env.push(("PORTAL_URL".to_string(), format!("https://{hostname}")));
+        // Inject NODE_EXTRA_CA_CERTS so Node.js child processes trust our local CA
+        if config.proxy.https {
+            let ca_path = crate::config::dirs_for_state().join("ca.pem");
+            if ca_path.exists() {
+                extra_env.push((
+                    "NODE_EXTRA_CA_CERTS".to_string(),
+                    ca_path.to_string_lossy().into_owned(),
+                ));
+            }
         }
     }
 
@@ -491,7 +501,11 @@ async fn do_run(
     }
 
     if !quiet {
-        banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
+        if tcp {
+            banner::print_tcp_banner(&hostname, port, child_pid, reuse_port.is_some());
+        } else {
+            banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
+        }
     }
 
     // Wait for child to exit, or intercept Ctrl+C to stop it gracefully.
