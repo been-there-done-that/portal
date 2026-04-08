@@ -34,6 +34,10 @@ pub enum Command {
         pid: u32,
         cwd: String,
     },
+    /// Force-sync /etc/hosts with the current route table
+    HostsSync,
+    /// Remove the portless-managed block from /etc/hosts
+    HostsClean,
 }
 
 /// Response sent from Daemon to CLI (IPC).
@@ -212,5 +216,21 @@ mod tests {
         } else {
             panic!("Expected Run command");
         }
+    }
+
+    #[test]
+    fn round_trips_hosts_sync_command() {
+        let cmd = Command::HostsSync;
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let back: Command = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back, Command::HostsSync));
+    }
+
+    #[test]
+    fn round_trips_hosts_clean_command() {
+        let cmd = Command::HostsClean;
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let back: Command = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(back, Command::HostsClean));
     }
 }

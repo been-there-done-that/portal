@@ -225,6 +225,14 @@ async fn dispatch(
             }
         }
 
+        Command::HostsSync => {
+            Response::err("HostsSync not yet implemented".to_string())
+        }
+
+        Command::HostsClean => {
+            Response::err("HostsClean not yet implemented".to_string())
+        }
+
         Command::Run { .. } => Response::err("use portal run from CLI"),
     }
 }
