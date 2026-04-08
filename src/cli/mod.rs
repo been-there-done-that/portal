@@ -425,6 +425,12 @@ async fn do_run(
         }
         explicit_port
     } else if let Some(dp) = declared_port {
+        if let Some(_old) = reuse_port {
+            let mut s = ipc_connect().await?;
+            write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+            let _: crate::proto::Response = read_frame(&mut s).await?;
+            crate::ports::wait_for_port_free(dp, std::time::Duration::from_secs(2)).await;
+        }
         dp
     } else if let Some(old_port) = reuse_port {
         let mut s = ipc_connect().await?;
