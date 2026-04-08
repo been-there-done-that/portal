@@ -105,6 +105,16 @@ fn plain_error(status: http::StatusCode, msg: &str) -> Response<BoxBodyType> {
         .unwrap()
 }
 
+/// Extract hostname from a Host or X-Forwarded-Host header value, stripping any port.
+pub fn extract_host(h: Option<&http::HeaderValue>) -> String {
+    h.and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Main proxy handler for HTTPS requests.
 pub async fn handle_https_request(
     req: Request<Incoming>,
@@ -122,15 +132,17 @@ pub async fn handle_https_request(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let hostname = req
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let hostname = {
+        let from_host = extract_host(req.headers().get(http::header::HOST));
+        if routes.get(&from_host).is_some() {
+            from_host
+        } else {
+            // Fallback: reverse proxies (ngrok, Cloudflare Tunnel) pass the original
+            // hostname in X-Forwarded-Host when they rewrite the Host header.
+            let forwarded = extract_host(req.headers().get("x-forwarded-host"));
+            if !forwarded.is_empty() { forwarded } else { from_host }
+        }
+    };
 
     if hops >= MAX_HOPS {
         return Ok(if accept_html {
@@ -391,5 +403,16 @@ mod tests {
         let req_without_upgrade = Request::builder().uri("/").body(()).unwrap();
 
         assert!(!is_websocket_upgrade(&req_without_upgrade));
+    }
+
+    #[test]
+    fn extract_host_strips_port() {
+        let val = http::HeaderValue::from_static("myapp.localhost:443");
+        assert_eq!(extract_host(Some(&val)), "myapp.localhost");
+    }
+
+    #[test]
+    fn extract_host_returns_empty_on_none() {
+        assert_eq!(extract_host(None), "");
     }
 }
