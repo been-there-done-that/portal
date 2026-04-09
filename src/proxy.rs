@@ -320,6 +320,9 @@ pub async fn handle_https_request(
         }
     };
 
+    // Skip capturing inspector's own traffic — it's self-referential noise
+    let inspector = if hostname == "_.localhost" { None } else { inspector };
+
     if hops >= MAX_HOPS {
         return Ok(if accept_html {
             Response::builder()
