@@ -4,13 +4,18 @@ use crate::error::Result;
 
 #[derive(Clone)]
 pub struct RouteManager {
-    pub(crate) store: StateStore,
-    pub(crate) tcp: TcpRouteManager,
+    store: StateStore,
+    tcp: TcpRouteManager,
 }
 
 impl RouteManager {
     pub fn new(store: StateStore, tcp: TcpRouteManager) -> Self {
         Self { store, tcp }
+    }
+
+    /// Access the underlying StateStore for read-only proxy routing.
+    pub fn store(&self) -> &StateStore {
+        &self.store
     }
 
     pub fn get(&self, hostname: &str) -> Option<Route> {

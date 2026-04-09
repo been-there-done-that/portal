@@ -243,7 +243,7 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
 
         {
             let cs = cert_store.clone();
-            let rt = manager.store.clone();
+            let rt = manager.store().clone();
             tokio::spawn(serve_https(https_listener, cs, rt, inspector.clone()));
         }
     } else {

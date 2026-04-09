@@ -213,7 +213,9 @@ async fn dispatch(
 ) -> Response {
     match cmd {
         Command::Ls => {
-            manager.remove_stale().await;
+            if let Err(e) = manager.remove_stale().await {
+                tracing::warn!("stale route cleanup failed: {e}");
+            }
             let list: Vec<_> = manager
                 .list()
                 .into_iter()
@@ -255,14 +257,18 @@ async fn dispatch(
                         use nix::unistd::Pid;
                         killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
-                    manager.remove(&hostname).await;
+                    if let Err(e) = manager.remove(&hostname).await {
+                        tracing::warn!("failed to remove route {hostname}: {e}");
+                    }
                     Response::ok_empty()
                 }
             }
         }
 
         Command::Rm { hostname } => {
-            manager.remove(&hostname).await;
+            if let Err(e) = manager.remove(&hostname).await {
+                tracing::warn!("failed to remove route {hostname}: {e}");
+            }
             Response::ok_empty()
         }
 
