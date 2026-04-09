@@ -1325,14 +1325,45 @@ fn show_conflict_menu(occupiers: &[PortOccupier]) -> crate::error::Result<Confli
 async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()> {
     // Try graceful portal shutdown first (via IPC) — this cleanly shuts down
     // the daemon including its forked grandchild, hosts cleanup, and socket removal.
-    let sock = crate::config::dirs_for_state().join("portal.sock");
+    let state_dir = crate::config::dirs_for_state();
+    let sock = state_dir.join("portal.sock");
     if sock.exists() {
         if let Ok(mut stream) = tokio::net::UnixStream::connect(&sock).await {
             let _ = crate::proto::write_frame(&mut stream, &crate::proto::Command::Shutdown).await;
-            // Give it a moment to shut down cleanly
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if check_ports_free(ports).is_empty() {
-                return Ok(());
+            // Poll up to 3s for clean shutdown
+            for _ in 0..30u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if check_ports_free(ports).is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Also try killing the PID from daemon.pid (the actual daemon grandchild,
+    // which may differ from the PID lsof found if the parent already exited).
+    let pid_path = state_dir.join("daemon.pid");
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+        if let Ok(daemon_pid) = pid_str.trim().parse::<u32>() {
+            #[cfg(unix)]
+            {
+                // sudo kill — the daemon runs as root
+                let _ = tokio::process::Command::new("sudo")
+                    .args(["kill", &daemon_pid.to_string()])
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::inherit())
+                    .status()
+                    .await;
+            }
+            // Poll briefly
+            for _ in 0..20u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if check_ports_free(ports).is_empty() {
+                    let _ = std::fs::remove_file(&pid_path);
+                    let _ = std::fs::remove_file(&sock);
+                    return Ok(());
+                }
             }
         }
     }
