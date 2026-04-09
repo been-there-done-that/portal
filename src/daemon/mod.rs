@@ -236,10 +236,20 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
                 }
             };
 
-        let http_bind = format!("0.0.0.0:{}", config.proxy.http_port);
-        let https_bind = format!("0.0.0.0:{}", config.proxy.https_port);
-        let http_listener = tokio::net::TcpListener::bind(&http_bind).await?;
-        let https_listener = tokio::net::TcpListener::bind(&https_bind).await?;
+        // Use SO_REUSEADDR so the new daemon can bind immediately after the old
+        // one exits (even with TIME_WAIT connections from active browser sessions).
+        let http_listener = {
+            let sock = tokio::net::TcpSocket::new_v4()?;
+            sock.set_reuseaddr(true)?;
+            sock.bind(format!("0.0.0.0:{}", config.proxy.http_port).parse().unwrap())?;
+            sock.listen(1024)?
+        };
+        let https_listener = {
+            let sock = tokio::net::TcpSocket::new_v4()?;
+            sock.set_reuseaddr(true)?;
+            sock.bind(format!("0.0.0.0:{}", config.proxy.https_port).parse().unwrap())?;
+            sock.listen(1024)?
+        };
 
         tracing::info!(
             "portal daemon started (pid={}, mode={}, http={}, https={})",

@@ -1127,7 +1127,24 @@ fn check_ports_free(ports: &[u16]) -> Vec<u16> {
     ports
         .iter()
         .copied()
-        .filter(|&p| std::net::TcpListener::bind(("0.0.0.0", p)).is_err())
+        .filter(|&p| {
+            // Use SO_REUSEADDR to match daemon behavior — TIME_WAIT ports
+            // are considered free (the daemon can bind them with reuseaddr).
+            use std::net::{SocketAddr, TcpListener};
+            let addr: SocketAddr = format!("0.0.0.0:{p}").parse().unwrap();
+            let sock = match socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None) {
+                Ok(s) => s,
+                Err(_) => return true, // can't create socket → assume in use
+            };
+            sock.set_reuse_address(true).ok();
+            if sock.bind(&addr.into()).is_err() {
+                return true; // genuinely in use by another process
+            }
+            if sock.listen(1).is_err() {
+                return true;
+            }
+            false // port is free (with reuseaddr)
+        })
         .collect()
 }
 

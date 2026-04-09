@@ -40,6 +40,7 @@ indicatif = "0.17"
 console = "0.15"
 dialoguer = "0.11"
 bytes = "1"
+socket2 = "0.5"
 http = "1"
 axum = { version = "0.8", features = ["http1", "macros"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
