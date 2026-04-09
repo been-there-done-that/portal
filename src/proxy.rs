@@ -38,7 +38,11 @@ pub async fn peek_first_byte(stream: &TcpStream) -> std::io::Result<u8> {
 }
 
 /// Listen on port 80 and redirect all HTTP traffic to HTTPS.
-pub async fn serve_http_redirect(listener: tokio::net::TcpListener, http_port: u16, https_port: u16) {
+pub async fn serve_http_redirect(
+    listener: tokio::net::TcpListener,
+    http_port: u16,
+    https_port: u16,
+) {
     loop {
         let (mut stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -141,7 +145,11 @@ pub async fn handle_https_request(
             // Fallback: reverse proxies (ngrok, Cloudflare Tunnel) pass the original
             // hostname in X-Forwarded-Host when they rewrite the Host header.
             let forwarded = extract_host(req.headers().get("x-forwarded-host"));
-            if !forwarded.is_empty() { forwarded } else { from_host }
+            if !forwarded.is_empty() {
+                forwarded
+            } else {
+                from_host
+            }
         }
     };
 
@@ -153,7 +161,10 @@ pub async fn handle_https_request(
                 .body(full_body(crate::pages::page_508(&hostname)))
                 .unwrap()
         } else {
-            plain_error(StatusCode::LOOP_DETECTED, &format!("loop detected proxying {hostname}"))
+            plain_error(
+                StatusCode::LOOP_DETECTED,
+                &format!("loop detected proxying {hostname}"),
+            )
         });
     }
 
@@ -167,7 +178,10 @@ pub async fn handle_https_request(
                     .body(full_body(crate::pages::page_404(&hostname)))
                     .unwrap()
             } else {
-                plain_error(StatusCode::NOT_FOUND, &format!("no route registered for {hostname}"))
+                plain_error(
+                    StatusCode::NOT_FOUND,
+                    &format!("no route registered for {hostname}"),
+                )
             });
         }
     };
@@ -205,7 +219,10 @@ pub async fn handle_https_request(
                     .body(full_body(crate::pages::page_502(&hostname)))
                     .unwrap()
             } else {
-                plain_error(StatusCode::BAD_GATEWAY, &format!("{hostname} → port {port} unreachable"))
+                plain_error(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("{hostname} → port {port} unreachable"),
+                )
             });
         }
     };
@@ -220,8 +237,12 @@ pub async fn handle_https_request(
                 .unwrap());
         }
     };
-    parts.headers.insert(HOP_HEADER, (hops + 1).to_string().parse().unwrap());
-    parts.headers.insert("x-forwarded-proto", "https".parse().unwrap());
+    parts
+        .headers
+        .insert(HOP_HEADER, (hops + 1).to_string().parse().unwrap());
+    parts
+        .headers
+        .insert("x-forwarded-proto", "https".parse().unwrap());
 
     let client: Client<HttpConnector, BoxBodyType> =
         Client::builder(TokioExecutor::new()).build_http();
@@ -268,7 +289,10 @@ pub async fn handle_https_request(
                 .body(full_body(crate::pages::page_502(&hostname)))
                 .unwrap()
         } else {
-            plain_error(StatusCode::BAD_GATEWAY, &format!("{hostname} → port {port} unreachable"))
+            plain_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("{hostname} → port {port} unreachable"),
+            )
         }),
     }
 }
@@ -336,7 +360,9 @@ where
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
                     .header("content-type", "text/plain")
-                    .body(full_body("502 Bad Gateway: upstream did not respond to WebSocket upgrade"))
+                    .body(full_body(
+                        "502 Bad Gateway: upstream did not respond to WebSocket upgrade",
+                    ))
                     .unwrap());
             }
             Ok(n) => {
@@ -360,7 +386,9 @@ where
         return Ok(Response::builder()
             .status(StatusCode::BAD_GATEWAY)
             .header("content-type", "text/plain")
-            .body(full_body("502 Bad Gateway: upstream rejected WebSocket upgrade"))
+            .body(full_body(
+                "502 Bad Gateway: upstream rejected WebSocket upgrade",
+            ))
             .unwrap());
     }
 
@@ -374,7 +402,14 @@ where
             if let Some((name, value)) = line.split_once(": ") {
                 let name_lower = name.to_lowercase();
                 // Forward upgrade-relevant headers
-                if matches!(name_lower.as_str(), "upgrade" | "connection" | "sec-websocket-accept" | "sec-websocket-protocol" | "sec-websocket-extensions") {
+                if matches!(
+                    name_lower.as_str(),
+                    "upgrade"
+                        | "connection"
+                        | "sec-websocket-accept"
+                        | "sec-websocket-protocol"
+                        | "sec-websocket-extensions"
+                ) {
                     if let Ok(val) = http::HeaderValue::from_str(value) {
                         resp_builder = resp_builder.header(name_lower, val);
                     }
@@ -515,7 +550,9 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert(
             http::header::ACCEPT,
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".parse().unwrap(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                .parse()
+                .unwrap(),
         );
         assert!(wants_html(&headers));
     }

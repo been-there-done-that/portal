@@ -176,18 +176,29 @@ mod tests {
         let original = std::env::var("PORTAL_SYNC_HOSTS").ok();
 
         for value in &["0", "false", "no", "off"] {
-            unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", value); }
-            assert!(!should_sync(), "expected false for PORTAL_SYNC_HOSTS={value}");
+            unsafe {
+                std::env::set_var("PORTAL_SYNC_HOSTS", value);
+            }
+            assert!(
+                !should_sync(),
+                "expected false for PORTAL_SYNC_HOSTS={value}"
+            );
         }
 
         // Unset → true
-        unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); }
+        unsafe {
+            std::env::remove_var("PORTAL_SYNC_HOSTS");
+        }
         assert!(should_sync());
 
         // Restore original state
         match original {
-            Some(val) => unsafe { std::env::set_var("PORTAL_SYNC_HOSTS", val); },
-            None => unsafe { std::env::remove_var("PORTAL_SYNC_HOSTS"); },
+            Some(val) => unsafe {
+                std::env::set_var("PORTAL_SYNC_HOSTS", val);
+            },
+            None => unsafe {
+                std::env::remove_var("PORTAL_SYNC_HOSTS");
+            },
         }
     }
 
@@ -218,7 +229,8 @@ mod tests {
 
     #[test]
     fn remove_block_strips_managed_block() {
-        let content = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
+        let content =
+            "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
         let result = remove_block(content);
         assert!(!result.contains("portless-start"));
         assert!(!result.contains("myapp.localhost"));
@@ -234,14 +246,20 @@ mod tests {
 
     #[test]
     fn extract_managed_no_block() {
-        assert_eq!(extract_managed("127.0.0.1 localhost\n"), vec![] as Vec<String>);
+        assert_eq!(
+            extract_managed("127.0.0.1 localhost\n"),
+            vec![] as Vec<String>
+        );
     }
 
     #[test]
     fn extract_managed_returns_inner_lines() {
         let block = build_block(&["myapp.localhost", "api.localhost"]);
         let lines = extract_managed(&block);
-        assert_eq!(lines, vec!["127.0.0.1 myapp.localhost", "127.0.0.1 api.localhost"]);
+        assert_eq!(
+            lines,
+            vec!["127.0.0.1 myapp.localhost", "127.0.0.1 api.localhost"]
+        );
     }
 
     #[test]
@@ -287,7 +305,8 @@ mod tests {
     fn sync_replaces_existing_block() {
         let dir = tempfile::tempdir().unwrap();
         let hosts_file = dir.path().join("hosts");
-        let initial = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 oldapp.localhost\n# portless-end\n";
+        let initial =
+            "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 oldapp.localhost\n# portless-end\n";
         std::fs::write(&hosts_file, initial).unwrap();
 
         sync_hosts_file_at(&["newapp.localhost"], &hosts_file).unwrap();
@@ -301,7 +320,8 @@ mod tests {
     fn sync_empty_removes_block() {
         let dir = tempfile::tempdir().unwrap();
         let hosts_file = dir.path().join("hosts");
-        let initial = "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
+        let initial =
+            "127.0.0.1 localhost\n\n# portless-start\n127.0.0.1 myapp.localhost\n# portless-end\n";
         std::fs::write(&hosts_file, initial).unwrap();
 
         sync_hosts_file_at(&[], &hosts_file).unwrap();

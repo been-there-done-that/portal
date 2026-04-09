@@ -1,7 +1,7 @@
+use crate::detect::node::detect_package_manager;
+use crate::detect::{LanguageDriver, PortInjection};
 use std::fs;
 use std::path::Path;
-use crate::detect::{LanguageDriver, PortInjection};
-use crate::detect::node::detect_package_manager;
 
 pub struct StorybookDriver;
 
@@ -34,18 +34,21 @@ impl LanguageDriver for StorybookDriver {
         false
     }
 
-    fn priority(&self) -> u8 { 45 }
+    fn priority(&self) -> u8 {
+        45
+    }
 
-    fn name(&self) -> &'static str { "Storybook" }
+    fn name(&self) -> &'static str {
+        "Storybook"
+    }
 
     fn project_name(&self, cwd: &Path) -> Option<String> {
         let base = crate::detect::read_json_field(cwd, "package.json", "name")
-            .or_else(|| {
-                cwd.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(String::from)
-            })?;
-        Some(format!("{}-storybook", crate::detect::sanitize_hostname(&base)))
+            .or_else(|| cwd.file_name().and_then(|n| n.to_str()).map(String::from))?;
+        Some(format!(
+            "{}-storybook",
+            crate::detect::sanitize_hostname(&base)
+        ))
     }
 
     fn start_command(&self, cwd: &Path) -> Option<String> {
@@ -88,7 +91,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"scripts":{"storybook":"storybook dev"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(StorybookDriver.detect(tmp.path()));
     }
 
@@ -98,7 +102,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"scripts":{"start-storybook":"start-storybook -p 6006"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(StorybookDriver.detect(tmp.path()));
     }
 
@@ -108,7 +113,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"devDependencies":{"@storybook/react":"^7.0.0"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(StorybookDriver.detect(tmp.path()));
     }
 
@@ -118,7 +124,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"dependencies":{"@storybook/react":"^6.5.0"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(StorybookDriver.detect(tmp.path()));
     }
 
@@ -128,7 +135,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"name":"myapp","scripts":{"dev":"vite"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!StorybookDriver.detect(tmp.path()));
     }
 
@@ -152,7 +160,10 @@ mod tests {
     fn project_name_falls_back_to_directory_name() {
         let tmp = TempDir::new().unwrap();
         let name = StorybookDriver.project_name(tmp.path()).unwrap();
-        assert!(name.ends_with("-storybook"), "expected -storybook suffix, got: {name}");
+        assert!(
+            name.ends_with("-storybook"),
+            "expected -storybook suffix, got: {name}"
+        );
     }
 
     #[test]
@@ -161,7 +172,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"scripts":{"storybook":"storybook dev"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             StorybookDriver.start_command(tmp.path()),
             Some("npm run storybook".to_string()),
@@ -174,7 +186,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"scripts":{"start-storybook":"start-storybook -p 6006"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             StorybookDriver.start_command(tmp.path()),
             Some("npm run start-storybook".to_string()),
@@ -187,7 +200,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"scripts":{"storybook":"storybook dev","start-storybook":"old"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             StorybookDriver.start_command(tmp.path()),
             Some("npm run storybook".to_string()),
@@ -207,7 +221,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"scripts":{"storybook":"storybook dev"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             StorybookDriver.start_command(tmp.path()),
             Some("pnpm run storybook".to_string()),

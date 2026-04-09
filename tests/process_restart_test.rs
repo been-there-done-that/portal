@@ -1,10 +1,10 @@
 //! Integration tests for process restart and port reuse behavior.
 
-use std::path::Path;
-use std::time::Duration;
+use portal::detect::PortInjection;
 use portal::ports::{find_free_port, wait_for_port_free};
 use portal::process::{spawn_child, stop_child};
-use portal::detect::PortInjection;
+use std::path::Path;
+use std::time::Duration;
 
 /// Simulates portal start → stop → start on the same port.
 /// Verifies the second bind succeeds (no EADDRINUSE race).
@@ -22,15 +22,10 @@ async fn restart_on_same_port_no_eaddrinuse() {
         std::fs::write(&script_file, &script).unwrap();
 
         // Start a server that binds the port
-        let args = vec![
-            "python3".to_string(),
-            script_file.clone(),
-        ];
-        let mut child = spawn_child(
-            Path::new("/tmp"), &args, port,
-            PortInjection::EnvOnly,
-            &[],
-        ).await.unwrap();
+        let args = vec!["python3".to_string(), script_file.clone()];
+        let mut child = spawn_child(Path::new("/tmp"), &args, port, PortInjection::EnvOnly, &[])
+            .await
+            .unwrap();
 
         // Poll until the port is actually bound (python3 startup can be slow).
         // Bind 0.0.0.0 (wildcard) — on macOS, binding 127.0.0.1 succeeds even when
@@ -51,7 +46,10 @@ async fn restart_on_same_port_no_eaddrinuse() {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
-        assert!(port_in_use, "port {port} should be in use after python3 server started");
+        assert!(
+            port_in_use,
+            "port {port} should be in use after python3 server started"
+        );
 
         // Stop it
         let _ = stop_child(&mut child).await;
@@ -67,7 +65,10 @@ async fn restart_on_same_port_no_eaddrinuse() {
         })
         .await
         .unwrap_or(false);
-        assert!(is_free, "port should be free after stop_child + wait_for_port_free");
+        assert!(
+            is_free,
+            "port should be free after stop_child + wait_for_port_free"
+        );
 
         let _ = std::fs::remove_file(&script_file);
     }

@@ -1,14 +1,19 @@
 use std::path::PathBuf;
 
 use crate::config::dirs_for_state;
+use crate::daemon::DaemonMode;
 use crate::proto::{read_frame, write_frame, Command, Response};
-use crate::routes::StateStore;
+use crate::routes::{Route, RouteProtocol, StateStore};
+use crate::tcp::TcpRouteManager;
 
 pub struct IpcServer {
     sock_path: PathBuf,
     pid_path: PathBuf,
     routes: StateStore,
+    tcp_routes: TcpRouteManager,
     start_time: std::time::Instant,
+    mode: DaemonMode,
+    https_enabled: bool,
     http_port: u16,
     https_port: u16,
 }
@@ -18,6 +23,9 @@ impl IpcServer {
         sock_path: PathBuf,
         pid_path: PathBuf,
         routes: StateStore,
+        tcp_routes: TcpRouteManager,
+        mode: DaemonMode,
+        https_enabled: bool,
         http_port: u16,
         https_port: u16,
     ) -> Self {
@@ -27,7 +35,10 @@ impl IpcServer {
             sock_path,
             pid_path,
             routes,
+            tcp_routes,
             start_time: std::time::Instant::now(),
+            mode,
+            https_enabled,
             http_port,
             https_port,
         }
@@ -53,27 +64,27 @@ impl IpcServer {
                 Some(ug) => (0o660, Some(ug)),
                 None => (0o600, None),
             };
-            if let Err(e) = std::fs::set_permissions(
-                &self.sock_path,
-                std::fs::Permissions::from_mode(mode),
-            ) {
+            if let Err(e) =
+                std::fs::set_permissions(&self.sock_path, std::fs::Permissions::from_mode(mode))
+            {
                 eprintln!("portal: failed to set socket permissions: {e}");
             }
             if let Some((uid, gid)) = uid_gid {
                 unsafe {
-                    let path = std::ffi::CString::new(
-                        self.sock_path.to_string_lossy().as_bytes(),
-                    )
-                    .unwrap();
+                    let path = std::ffi::CString::new(self.sock_path.to_string_lossy().as_bytes())
+                        .unwrap();
                     nix::libc::chown(path.as_ptr(), uid, gid);
                 }
             }
         }
 
         let routes = self.routes.clone();
+        let tcp_routes = self.tcp_routes.clone();
         let start_time = self.start_time;
+        let mode = self.mode;
         let sock_path = self.sock_path.clone();
         let pid_path = self.pid_path.clone();
+        let https_enabled = self.https_enabled;
         let http_port = self.http_port;
         let https_port = self.https_port;
 
@@ -81,10 +92,23 @@ impl IpcServer {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let routes = routes.clone();
+                    let tcp_routes = tcp_routes.clone();
                     let sock = sock_path.clone();
                     let pid = pid_path.clone();
                     tokio::spawn(async move {
-                        handle_connection(stream, routes, start_time, sock, pid, http_port, https_port).await;
+                        handle_connection(
+                            stream,
+                            routes,
+                            tcp_routes,
+                            start_time,
+                            mode,
+                            sock,
+                            pid,
+                            https_enabled,
+                            http_port,
+                            https_port,
+                        )
+                        .await;
                     });
                 }
                 Err(e) => {
@@ -98,9 +122,12 @@ impl IpcServer {
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     routes: StateStore,
+    tcp_routes: TcpRouteManager,
     start_time: std::time::Instant,
+    mode: DaemonMode,
     sock_path: PathBuf,
     pid_path: PathBuf,
+    https_enabled: bool,
     http_port: u16,
     https_port: u16,
 ) {
@@ -109,7 +136,19 @@ async fn handle_connection(
         Err(_) => return,
     };
 
-    let response = dispatch(cmd, routes, start_time, sock_path, pid_path, http_port, https_port).await;
+    let response = dispatch(
+        cmd,
+        routes,
+        tcp_routes,
+        start_time,
+        mode,
+        sock_path,
+        pid_path,
+        https_enabled,
+        http_port,
+        https_port,
+    )
+    .await;
 
     write_frame(&mut stream, &response).await.ok();
 }
@@ -119,38 +158,100 @@ fn user_hostnames(routes: &StateStore) -> Vec<String> {
     routes
         .list()
         .into_iter()
-        .filter(|r| r.hostname != "_.localhost")
+        .filter(|r| r.hostname != "_.localhost" && r.protocol == RouteProtocol::Http)
         .map(|r| r.hostname)
         .collect()
+}
+
+fn public_url(https_enabled: bool, hostname: &str, http_port: u16, https_port: u16) -> String {
+    if https_enabled {
+        if https_port == 443 {
+            format!("https://{hostname}")
+        } else {
+            format!("https://{hostname}:{https_port}")
+        }
+    } else if http_port == 80 {
+        format!("http://{hostname}")
+    } else {
+        format!("http://{hostname}:{http_port}")
+    }
+}
+
+fn display_target_for_route(
+    route: &Route,
+    https_enabled: bool,
+    http_port: u16,
+    https_port: u16,
+) -> String {
+    match route.protocol {
+        RouteProtocol::Http => public_url(https_enabled, &route.hostname, http_port, https_port),
+        RouteProtocol::Tcp => format!("localhost:{}", route.public_port.unwrap_or(route.port)),
+    }
+}
+
+fn route_response_value(
+    route: &Route,
+    https_enabled: bool,
+    http_port: u16,
+    https_port: u16,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(route).unwrap_or_else(|_| serde_json::json!({}));
+    if let serde_json::Value::Object(ref mut obj) = value {
+        obj.insert(
+            "display_target".to_string(),
+            serde_json::Value::String(display_target_for_route(
+                route,
+                https_enabled,
+                http_port,
+                https_port,
+            )),
+        );
+    }
+    value
 }
 
 async fn dispatch(
     cmd: Command,
     routes: StateStore,
+    tcp_routes: TcpRouteManager,
     start_time: std::time::Instant,
+    mode: DaemonMode,
     sock_path: PathBuf,
     pid_path: PathBuf,
+    https_enabled: bool,
     http_port: u16,
     https_port: u16,
 ) -> Response {
     match cmd {
         Command::Ls => {
-            let _ = routes.remove_stale().await;
+            let removed = routes.remove_stale().await.unwrap_or_default();
+            for route in removed {
+                if route.protocol == RouteProtocol::Tcp {
+                    tcp_routes.remove(&route.hostname).await;
+                }
+            }
             let list: Vec<_> = routes
                 .list()
                 .into_iter()
                 .filter(|r| r.hostname != "_.localhost")
+                .map(|route| route_response_value(&route, https_enabled, http_port, https_port))
                 .collect();
-            Response::ok(serde_json::to_value(&list).unwrap_or(serde_json::Value::Array(vec![])))
+            Response::ok(serde_json::Value::Array(list))
         }
 
         Command::Status => {
             let uptime_secs = start_time.elapsed().as_secs();
-            let routes_count = routes.list().iter().filter(|r| r.hostname != "_.localhost").count();
+            let routes_count = routes
+                .list()
+                .iter()
+                .filter(|r| r.hostname != "_.localhost")
+                .count();
             Response::ok(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "pid": std::process::id(),
                 "uptime_secs": uptime_secs,
+                "mode": mode.as_str(),
+                "https": https_enabled,
                 "http_port": http_port,
                 "https_port": https_port,
                 "routes_count": routes_count,
@@ -170,6 +271,7 @@ async fn dispatch(
                         use nix::unistd::Pid;
                         killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
+                    tcp_routes.remove(&hostname).await;
                     let _ = routes.remove(&hostname).await;
                     Response::ok_empty()
                 }
@@ -177,14 +279,17 @@ async fn dispatch(
         }
 
         Command::Rm { hostname } => {
+            tcp_routes.remove(&hostname).await;
             let _ = routes.remove(&hostname).await;
             Response::ok_empty()
         }
 
         Command::Shutdown => {
+            let shutdown_tcp_routes = tcp_routes.clone();
             let sock = sock_path.clone();
             let pid = pid_path.clone();
             tokio::spawn(async move {
+                shutdown_tcp_routes.shutdown_all().await;
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if let Err(e) = crate::hosts::clean_hosts_file() {
                     tracing::warn!("hosts cleanup on shutdown failed: {e}");
@@ -221,20 +326,30 @@ async fn dispatch(
         Command::RegisterRoute {
             hostname,
             port,
+            public_port,
+            protocol,
             pid,
             cwd,
         } => {
             let route = crate::routes::Route {
                 hostname: hostname.clone(),
                 port,
+                public_port,
+                protocol,
                 pid,
                 owner_pid: pid,
                 cwd,
                 created_at: chrono::Utc::now(),
             };
-            match routes.insert(route).await {
+            if let Err(e) = tcp_routes.ensure_route(&route).await {
+                return Response::err(e.to_string());
+            }
+            match routes.insert(route.clone()).await {
                 Ok(_) => Response::ok_empty(),
-                Err(e) => Response::err(e.to_string()),
+                Err(e) => {
+                    tcp_routes.remove(&route.hostname).await;
+                    Response::err(e.to_string())
+                }
             }
         }
 
@@ -264,6 +379,58 @@ async fn dispatch(
 }
 
 #[cfg(test)]
+mod stale_tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn ls_removes_stale_tcp_routes_and_releases_public_port() {
+        let temp = TempDir::new().unwrap();
+        let routes = StateStore::new(temp.path().join("routes.json")).unwrap();
+        let tcp_routes = TcpRouteManager::default();
+
+        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let public_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+
+        let route = Route {
+            hostname: "redis.localhost".to_string(),
+            port: public_port + 1,
+            public_port: Some(public_port),
+            protocol: RouteProtocol::Tcp,
+            pid: u32::MAX,
+            owner_pid: u32::MAX,
+            cwd: "/tmp".to_string(),
+            created_at: Utc::now(),
+        };
+        routes.insert(route.clone()).await.unwrap();
+        tcp_routes.ensure_route(&route).await.unwrap();
+
+        let response = dispatch(
+            Command::Ls,
+            routes.clone(),
+            tcp_routes.clone(),
+            std::time::Instant::now(),
+            DaemonMode::TcpOnly,
+            temp.path().join("portal.sock"),
+            temp.path().join("daemon.pid"),
+            false,
+            80,
+            443,
+        )
+        .await;
+
+        assert!(response.ok);
+        assert!(routes.get("redis.localhost").is_none());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", public_port));
+        assert!(rebound.is_ok());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -285,28 +452,74 @@ mod tests {
         let store = crate::routes::StateStore::new(dir.path().join("routes.json")).unwrap();
 
         // Insert a real user route
-        store.insert(crate::routes::Route {
-            hostname: "myapp.localhost".to_string(),
-            port: 4000,
-            pid: std::process::id(),
-            owner_pid: std::process::id(),
-            cwd: "/tmp".to_string(),
-            created_at: chrono::Utc::now(),
-        }).await.unwrap();
+        store
+            .insert(crate::routes::Route {
+                hostname: "myapp.localhost".to_string(),
+                port: 4000,
+                public_port: None,
+                protocol: crate::routes::RouteProtocol::Http,
+                pid: std::process::id(),
+                owner_pid: std::process::id(),
+                cwd: "/tmp".to_string(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
 
         // Insert the internal inspector route
-        store.insert(crate::routes::Route {
-            hostname: "_.localhost".to_string(),
-            port: 9999,
-            pid: std::process::id(),
-            owner_pid: std::process::id(),
-            cwd: String::new(),
-            created_at: chrono::Utc::now(),
-        }).await.unwrap();
+        store
+            .insert(crate::routes::Route {
+                hostname: "_.localhost".to_string(),
+                port: 9999,
+                public_port: None,
+                protocol: crate::routes::RouteProtocol::Http,
+                pid: std::process::id(),
+                owner_pid: std::process::id(),
+                cwd: String::new(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
 
         let result = user_hostnames(&store);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "myapp.localhost");
         assert!(!result.contains(&"_.localhost".to_string()));
+    }
+
+    #[test]
+    fn display_target_uses_non_default_https_port_for_http_routes() {
+        let route = Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: 1,
+            owner_pid: 1,
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            display_target_for_route(&route, true, 80, 4443),
+            "https://myapp.localhost:4443"
+        );
+    }
+
+    #[test]
+    fn display_target_uses_public_port_for_tcp_routes() {
+        let route = Route {
+            hostname: "redis.localhost".to_string(),
+            port: 6379,
+            public_port: Some(46379),
+            protocol: RouteProtocol::Tcp,
+            pid: 1,
+            owner_pid: 1,
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            display_target_for_route(&route, true, 80, 443),
+            "localhost:46379"
+        );
     }
 }

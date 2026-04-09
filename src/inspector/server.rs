@@ -12,12 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::StreamExt;
 
-use crate::inspector::{
-    assets::serve_embedded,
-    db::Db,
-    sse::SseTx,
-    types::RequestMeta,
-};
+use crate::inspector::{assets::serve_embedded, db::Db, sse::SseTx, types::RequestMeta};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,7 +22,10 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/api/requests", get(get_requests).delete(delete_all_requests))
+        .route(
+            "/api/requests",
+            get(get_requests).delete(delete_all_requests),
+        )
         .route("/api/requests/{id}", delete(delete_one_request))
         .route("/api/stream", get(sse_handler))
         .fallback(static_handler)
@@ -55,17 +53,15 @@ async fn get_requests(
     let limit = q.limit.unwrap_or(100).min(500);
     let records = state
         .db
-        .query_page(
-            q.hostname.as_deref(),
-            q.before_id,
-            limit + 1,
-            q.id,
-        )
+        .query_page(q.hostname.as_deref(), q.before_id, limit + 1, q.id)
         .unwrap_or_default();
 
     let has_more = records.len() > limit;
     let records = records.into_iter().take(limit).collect();
-    Json(RequestsResponse { requests: records, has_more })
+    Json(RequestsResponse {
+        requests: records,
+        has_more,
+    })
 }
 
 async fn delete_all_requests(
@@ -84,7 +80,9 @@ async fn delete_one_request(
     StatusCode::NO_CONTENT
 }
 
-async fn sse_handler(State(state): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+async fn sse_handler(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.sse_tx.subscribe();
     let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
         .filter_map(|res| res.ok())

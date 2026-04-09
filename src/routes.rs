@@ -5,10 +5,22 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteProtocol {
+    #[default]
+    Http,
+    Tcp,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     pub hostname: String,
     pub port: u16,
+    #[serde(default)]
+    pub public_port: Option<u16>,
+    #[serde(default)]
+    pub protocol: RouteProtocol,
     pub pid: u32,
     #[serde(default)]
     pub owner_pid: u32,
@@ -77,21 +89,23 @@ impl StateStore {
         Ok(())
     }
 
-    pub async fn remove_stale(&self) -> Result<()> {
+    pub async fn remove_stale(&self) -> Result<Vec<Route>> {
         let _guard = self.write_lock.lock().await;
-        let to_remove: Vec<String> = self.map.iter()
+        let removed: Vec<Route> = self
+            .map
+            .iter()
             .filter(|e| !pid_alive_check(e.value().pid))
-            .map(|e| e.key().clone())
+            .map(|e| e.value().clone())
             .collect();
-        if to_remove.is_empty() {
-            return Ok(());
+        if removed.is_empty() {
+            return Ok(Vec::new());
         }
-        for h in &to_remove {
-            self.map.remove(h);
+        for route in &removed {
+            self.map.remove(&route.hostname);
         }
         self.persist_locked()?;
         self.sync_hosts_locked();
-        Ok(())
+        Ok(removed)
     }
 
     // ── Private helpers (called while write_lock is held) ─────────────────
@@ -117,8 +131,13 @@ impl StateStore {
         if !crate::hosts::should_sync() {
             return;
         }
-        let hostnames: Vec<String> = self.map.iter()
-            .filter(|e| e.key() != "_.localhost")
+        let hostnames: Vec<String> = self
+            .map
+            .iter()
+            .filter(|e| {
+                let route = e.value();
+                route.hostname != "_.localhost" && route.protocol == RouteProtocol::Http
+            })
             .map(|e| e.key().clone())
             .collect();
         let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
@@ -141,9 +160,9 @@ pub fn pid_alive_check(pid: u32) -> bool {
             _ => return false,
         };
         match kill(Pid::from_raw(raw), None) {
-            Ok(_) => true,                              // process exists and we can signal it
-            Err(nix::errno::Errno::EPERM) => true,      // exists but owned by another user
-            Err(_) => false,                            // ESRCH = no such process, or other error
+            Ok(_) => true,                         // process exists and we can signal it
+            Err(nix::errno::Errno::EPERM) => true, // exists but owned by another user
+            Err(_) => false,                       // ESRCH = no such process, or other error
         }
     }
 
@@ -180,6 +199,8 @@ mod tests {
         let route = Route {
             hostname: "myapp.localhost".to_string(),
             port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
             pid: std::process::id(),
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
@@ -203,6 +224,8 @@ mod tests {
             let route = Route {
                 hostname: "myapp.localhost".to_string(),
                 port: 4000,
+                public_port: None,
+                protocol: RouteProtocol::Http,
                 pid: std::process::id(),
                 owner_pid: std::process::id(),
                 cwd: "/tmp".to_string(),
@@ -226,6 +249,8 @@ mod tests {
         let route = Route {
             hostname: "myapp.localhost".to_string(),
             port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
             pid: std::process::id(),
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
@@ -250,6 +275,8 @@ mod tests {
         let route_alive = Route {
             hostname: "alive.localhost".to_string(),
             port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
             pid: current_pid,
             owner_pid: current_pid,
             cwd: "/tmp".to_string(),
@@ -260,6 +287,8 @@ mod tests {
         let route_dead = Route {
             hostname: "dead.localhost".to_string(),
             port: 4001,
+            public_port: None,
+            protocol: RouteProtocol::Http,
             pid: u32::MAX, // Invalid PID, definitely dead
             owner_pid: u32::MAX,
             cwd: "/tmp".to_string(),
@@ -270,12 +299,40 @@ mod tests {
         store.insert(route_dead).await.unwrap();
 
         // Run cleanup
-        store.remove_stale().await.unwrap();
+        let removed = store.remove_stale().await.unwrap();
 
         // Alive route should remain
         assert!(store.get("alive.localhost").is_some());
         // Dead route should be removed
         assert!(store.get("dead.localhost").is_none());
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].hostname, "dead.localhost");
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_returns_removed_tcp_routes() {
+        let temp = TempDir::new().unwrap();
+        let store_path = temp.path().join("routes.json");
+        let store = StateStore::new(store_path).unwrap();
+
+        store
+            .insert(Route {
+                hostname: "redis.localhost".to_string(),
+                port: 6379,
+                public_port: Some(46379),
+                protocol: RouteProtocol::Tcp,
+                pid: u32::MAX,
+                owner_pid: u32::MAX,
+                cwd: "/tmp".to_string(),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let removed = store.remove_stale().await.unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].protocol, RouteProtocol::Tcp);
+        assert_eq!(removed[0].public_port, Some(46379));
     }
 
     #[tokio::test]
@@ -291,14 +348,20 @@ mod tests {
                 s.insert(crate::routes::Route {
                     hostname: format!("app{i}.localhost"),
                     port: 4000 + i as u16,
+                    public_port: None,
+                    protocol: RouteProtocol::Http,
                     pid: std::process::id(),
                     owner_pid: std::process::id(),
                     cwd: "/tmp".to_string(),
                     created_at: chrono::Utc::now(),
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
             }));
         }
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
 
         assert_eq!(store.list().len(), 20);
 
@@ -306,4 +369,19 @@ mod tests {
         assert_eq!(store2.list().len(), 20);
     }
 
+    #[tokio::test]
+    async fn old_http_routes_deserialize_without_protocol_fields() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store_path = temp.path().join("routes.json");
+        std::fs::write(
+            &store_path,
+            r#"[{"hostname":"legacy.localhost","port":4000,"pid":1,"owner_pid":1,"cwd":"/tmp","created_at":"2026-04-09T00:00:00Z"}]"#,
+        )
+        .unwrap();
+
+        let store = StateStore::new(store_path).unwrap();
+        let route = store.get("legacy.localhost").unwrap();
+        assert_eq!(route.protocol, RouteProtocol::Http);
+        assert_eq!(route.public_port, None);
+    }
 }

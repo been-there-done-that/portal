@@ -43,27 +43,32 @@ fn print_routes_table(resp: &Response) {
     };
 
     let hostname_col = style("HOSTNAME").dim().to_string();
-    let port_col = style("PORT").dim().to_string();
-    let url_col = style("URL").dim().to_string();
+    let proto_col = style("PROTO").dim().to_string();
+    let backend_col = style("BACKEND").dim().to_string();
+    let target_col = style("TARGET").dim().to_string();
     println!(
-        "  {}  {}  {}",
+        "  {}  {}  {}  {}",
         pad_right(&hostname_col, 30),
-        pad_left(&port_col, 6),
-        url_col
+        pad_right(&proto_col, 6),
+        pad_left(&backend_col, 7),
+        target_col
     );
-    println!("  {}", style("─".repeat(58)).dim());
+    println!("  {}", style("─".repeat(78)).dim());
     for route in &routes {
         let hostname = route["hostname"].as_str().unwrap_or("-");
+        let protocol = route["protocol"].as_str().unwrap_or("http").to_uppercase();
         let port = route["port"].as_u64().unwrap_or(0);
-        let url = format!("https://{hostname}");
+        let target = route["display_target"].as_str().unwrap_or("-");
         let hostname_styled = style(hostname).dim().to_string();
+        let protocol_styled = style(protocol).cyan().to_string();
         let port_styled = style(format!("{port}")).red().to_string();
-        let url_styled = style(url).bold().white().to_string();
+        let target_styled = style(target).bold().white().to_string();
         println!(
-            "  {}  {}  {}",
+            "  {}  {}  {}  {}",
             pad_right(&hostname_styled, 30),
-            pad_left(&port_styled, 6),
-            url_styled
+            pad_right(&protocol_styled, 6),
+            pad_left(&port_styled, 7),
+            target_styled
         );
     }
 }
@@ -98,6 +103,7 @@ pub fn print_status(status: &Response, routes: &Response) {
         let version = data["version"].as_str().unwrap_or("?");
         let pid = data["pid"].as_u64().unwrap_or(0);
         let uptime = format_uptime(data["uptime_secs"].as_u64().unwrap_or(0));
+        let mode = data["mode"].as_str().unwrap_or("full");
         let http_port = data["http_port"].as_u64().unwrap_or(80);
         let https_port = data["https_port"].as_u64().unwrap_or(443);
         let routes_count = data["routes_count"].as_u64().unwrap_or(0);
@@ -121,6 +127,11 @@ pub fn print_status(status: &Response, routes: &Response) {
             style(&uptime).dim()
         );
         println!(
+            "  {}  {}",
+            pad_right(&style("mode").dim().to_string(), label_w),
+            style(mode).dim()
+        );
+        println!(
             "  {}  {}  →  {}",
             pad_right(&style("ports").dim().to_string(), label_w),
             style(format!(":{http_port}")).dim(),
@@ -133,7 +144,8 @@ pub fn print_status(status: &Response, routes: &Response) {
         );
 
         // Drive the table off the actual routes response, not the status count.
-        let has_routes = matches!(&routes.data, Some(serde_json::Value::Array(arr)) if !arr.is_empty());
+        let has_routes =
+            matches!(&routes.data, Some(serde_json::Value::Array(arr)) if !arr.is_empty());
         if routes.ok && has_routes {
             println!();
             print_routes_table(routes);
@@ -142,7 +154,10 @@ pub fn print_status(status: &Response, routes: &Response) {
             eprintln!("  (routes unavailable: {msg})");
         }
     } else {
-        println!("{}", style("daemon running, no status data available").dim());
+        println!(
+            "{}",
+            style("daemon running, no status data available").dim()
+        );
     }
 }
 

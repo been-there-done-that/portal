@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use clap_complete::Shell;
+use std::path::{Path, PathBuf};
 
 pub fn detect_shell() -> Option<Shell> {
     let shell_path = std::env::var("SHELL").ok()?;
@@ -40,7 +40,11 @@ pub fn default_install_path(shell: Shell) -> PathBuf {
 }
 
 fn post_install_message(shell: Shell, path: &Path, is_omz: bool) {
-    println!("{} Installed to {}", console::style("✓").green(), path.display());
+    println!(
+        "{} Installed to {}",
+        console::style("✓").green(),
+        path.display()
+    );
     match shell {
         Shell::Zsh if !is_omz => {
             println!("\nAdd to ~/.zshrc (if not already present):");
@@ -58,11 +62,7 @@ fn post_install_message(shell: Shell, path: &Path, is_omz: bool) {
     }
 }
 
-pub fn run(
-    shell: Option<Shell>,
-    print: bool,
-    path: Option<PathBuf>,
-) -> crate::error::Result<()> {
+pub fn run(shell: Option<Shell>, print: bool, path: Option<PathBuf>) -> crate::error::Result<()> {
     use clap::CommandFactory;
     use clap_complete::generate;
     use std::io::Write;
@@ -92,7 +92,9 @@ pub fn run(
     let install_path = match path {
         Some(dir) => {
             let default = default_install_path(shell);
-            let filename = default.file_name().expect("default path always has filename");
+            let filename = default
+                .file_name()
+                .expect("default path always has filename");
             dir.join(filename)
         }
         None => default_install_path(shell),
@@ -202,14 +204,18 @@ mod tests {
     fn default_path_fish() {
         let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Fish);
-        assert!(path.to_string_lossy().ends_with(".config/fish/completions/portal.fish"));
+        assert!(path
+            .to_string_lossy()
+            .ends_with(".config/fish/completions/portal.fish"));
     }
 
     #[test]
     fn default_path_bash() {
         let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Bash);
-        assert!(path.to_string_lossy().ends_with(".local/share/bash-completion/completions/portal"));
+        assert!(path
+            .to_string_lossy()
+            .ends_with(".local/share/bash-completion/completions/portal"));
     }
 
     #[test]
@@ -227,7 +233,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("ZSH", tmp.path()) };
         let path = default_install_path(Shell::Zsh);
-        assert!(path.to_string_lossy().ends_with(".oh-my-zsh/completions/_portal"));
+        assert!(path
+            .to_string_lossy()
+            .ends_with(".oh-my-zsh/completions/_portal"));
         unsafe { std::env::remove_var("ZSH") };
     }
 
@@ -235,14 +243,18 @@ mod tests {
     fn default_path_powershell() {
         let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::PowerShell);
-        assert!(path.to_string_lossy().ends_with("PowerShell/Completions/portal.ps1"));
+        assert!(path
+            .to_string_lossy()
+            .ends_with("PowerShell/Completions/portal.ps1"));
     }
 
     #[test]
     fn default_path_elvish() {
         let _guard = ENV_LOCK.lock().unwrap();
         let path = default_install_path(Shell::Elvish);
-        assert!(path.to_string_lossy().ends_with(".config/elvish/lib/portal.elv"));
+        assert!(path
+            .to_string_lossy()
+            .ends_with(".config/elvish/lib/portal.elv"));
     }
 
     #[test]

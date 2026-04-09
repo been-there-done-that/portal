@@ -21,7 +21,10 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum CliCommand {
     /// Start the background daemon
-    Daemon,
+    Daemon {
+        #[arg(long, hide = true)]
+        tcp_only: bool,
+    },
     /// Auto-detect and start the best dev script from package.json
     Start {
         #[arg(long, short = 'q', help = "Suppress startup banner and running output")]
@@ -98,8 +101,13 @@ pub enum HostsAction {
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        CliCommand::Daemon => {
-            crate::daemon::start().await?;
+        CliCommand::Daemon { tcp_only } => {
+            let mode = if tcp_only {
+                crate::daemon::DaemonMode::TcpOnly
+            } else {
+                crate::daemon::DaemonMode::Full
+            };
+            crate::daemon::start(mode).await?;
         }
 
         CliCommand::Start { quiet } => {
@@ -110,7 +118,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             let driver = match registry.detect(&cwd) {
                 Some(d) => d,
                 None => {
-                    eprintln!("No supported project detected. Run `portal init` to set up this project.");
+                    eprintln!(
+                        "No supported project detected. Run `portal init` to set up this project."
+                    );
                     std::process::exit(1);
                 }
             };
@@ -118,27 +128,40 @@ pub async fn run(cli: Cli) -> Result<()> {
             let raw_cmd = match driver.start_command(&cwd) {
                 Some(cmd) => cmd,
                 None => {
-                    eprintln!("Detected {} but couldn't determine a start command. Run `portal init`.", driver.name());
+                    eprintln!(
+                        "Detected {} but couldn't determine a start command. Run `portal init`.",
+                        driver.name()
+                    );
                     std::process::exit(1);
                 }
             };
 
-            let hostname_override = config.project.name.clone()
+            let hostname_override = config
+                .project
+                .name
+                .clone()
                 .or_else(|| driver.project_name(&cwd));
 
-            let args: Vec<String> = raw_cmd
-                .split_whitespace()
-                .map(String::from)
-                .collect();
+            let args = parse_start_command(driver.name(), &raw_cmd)?;
 
-            do_run(cwd, config, args, hostname_override, None, true, quiet, false).await?;
+            do_run(
+                cwd,
+                config,
+                args,
+                hostname_override,
+                None,
+                true,
+                quiet,
+                false,
+            )
+            .await?;
         }
 
         CliCommand::Ls => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let mut setup = banner::SetupPrinter::new();
-            ensure_daemon_running(&config, &mut setup).await?;
+            ensure_daemon_running(&config, &mut setup, DaemonRequirement::Any).await?;
             setup.done();
             let mut stream = ipc_connect().await?;
             write_frame(&mut stream, &Command::Ls).await?;
@@ -150,7 +173,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let mut setup = banner::SetupPrinter::new();
-            ensure_daemon_running(&config, &mut setup).await?;
+            ensure_daemon_running(&config, &mut setup, DaemonRequirement::Any).await?;
             setup.done();
 
             let mut stream = ipc_connect().await?;
@@ -249,7 +272,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
-            do_run(cwd, config, resolved_args, hostname, port, false, quiet, tcp).await?;
+            do_run(
+                cwd,
+                config,
+                resolved_args,
+                hostname,
+                port,
+                false,
+                quiet,
+                tcp,
+            )
+            .await?;
         }
 
         CliCommand::Inspect => {
@@ -284,50 +317,70 @@ pub async fn run(cli: Cli) -> Result<()> {
             use std::io::IsTerminal;
             let is_tty = std::io::stdin().is_terminal();
 
-            let (start_command, port_arg, host_arg, port_position, name) =
-                if let Some(driver) = detected {
-                    let raw_cmd = driver.start_command(&cwd).unwrap_or_default();
-                    let proj_name = driver.project_name(&cwd)
-                        .unwrap_or_else(|| {
-                            cwd.file_name()
-                                .and_then(|n| n.to_str())
-                                .map(crate::detect::sanitize_hostname)
-                                .unwrap_or_else(|| "app".to_string())
-                        });
+            let (start_command, port_arg, host_arg, port_position, name) = if let Some(driver) =
+                detected
+            {
+                let raw_cmd = driver.start_command(&cwd).unwrap_or_default();
+                let proj_name = driver.project_name(&cwd).unwrap_or_else(|| {
+                    cwd.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(crate::detect::sanitize_hostname)
+                        .unwrap_or_else(|| "app".to_string())
+                });
 
-                    if is_tty {
-                        println!("\n  {} Detected  {}", console::style("✓").green(), driver.name());
-                        println!("  {} command   {}", console::style(" ").dim(), raw_cmd);
-                        println!("  {} name      {}\n", console::style(" ").dim(), proj_name);
+                if is_tty {
+                    println!(
+                        "\n  {} Detected  {}",
+                        console::style("✓").green(),
+                        driver.name()
+                    );
+                    println!("  {} command   {}", console::style(" ").dim(), raw_cmd);
+                    println!("  {} name      {}\n", console::style(" ").dim(), proj_name);
 
-                        let confirmed: bool = dialoguer::Confirm::new()
-                            .with_prompt("Does this look right?")
-                            .default(true)
-                            .interact()
-                            .unwrap_or(true);
+                    let confirmed: bool = dialoguer::Confirm::new()
+                        .with_prompt("Does this look right?")
+                        .default(true)
+                        .interact()
+                        .unwrap_or(true);
 
-                        if confirmed {
-                            let (pa, ha, pp) = injection_toml_fields(&driver.port_injection(&cwd, 0));
-                            (raw_cmd, pa, ha, pp, Some(proj_name))
-                        } else {
-                            prompt_manual_config()?
-                        }
-                    } else {
+                    if confirmed {
                         let (pa, ha, pp) = injection_toml_fields(&driver.port_injection(&cwd, 0));
                         (raw_cmd, pa, ha, pp, Some(proj_name))
+                    } else {
+                        prompt_manual_config()?
                     }
-                } else if is_tty {
-                    prompt_manual_config()?
                 } else {
-                    write_placeholder_toml(&cwd)?;
-                    println!("portal.toml created with placeholder. Edit it to configure your project.");
-                    return Ok(());
-                };
+                    let (pa, ha, pp) = injection_toml_fields(&driver.port_injection(&cwd, 0));
+                    (raw_cmd, pa, ha, pp, Some(proj_name))
+                }
+            } else if is_tty {
+                prompt_manual_config()?
+            } else {
+                write_placeholder_toml(&cwd)?;
+                println!(
+                    "portal.toml created with placeholder. Edit it to configure your project."
+                );
+                return Ok(());
+            };
 
-            write_portal_toml(&cwd, &name, &start_command, &port_arg, &host_arg, &port_position)?;
+            write_portal_toml(
+                &cwd,
+                &name,
+                &start_command,
+                &port_arg,
+                &host_arg,
+                &port_position,
+            )?;
             println!("{} portal.toml created", console::style("✓").green());
-            println!("  Run: portal run {}",
-                start_command.split_whitespace().next().unwrap_or("your-server"));
+            let preview_args =
+                parse_command_line(&start_command).unwrap_or_else(|_| vec![start_command.clone()]);
+            println!(
+                "  Run: portal run {}",
+                preview_args
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("your-server")
+            );
         }
     }
 
@@ -350,7 +403,12 @@ async fn do_run(
     } else {
         banner::SetupPrinter::new()
     };
-    ensure_daemon_running(&config, &mut setup).await?;
+    let daemon_requirement = if tcp {
+        DaemonRequirement::TcpCapable
+    } else {
+        DaemonRequirement::Full
+    };
+    ensure_daemon_running(&config, &mut setup, daemon_requirement).await?;
     if !tcp {
         ensure_cert_trusted(&mut setup).await?;
     }
@@ -358,9 +416,10 @@ async fn do_run(
 
     let hostname =
         crate::detect::resolve_hostname(&cwd, hostname_override.as_deref(), &config.proxy.tld);
+    let public_url = build_public_url(&config, &hostname);
 
     // Check for an existing live route for this hostname (replace-by-default)
-    let reuse_port: Option<u16> = {
+    let existing_route: Option<crate::routes::Route> = {
         let mut stream = ipc_connect().await?;
         write_frame(&mut stream, &Command::Ls).await?;
         let resp: crate::proto::Response = read_frame(&mut stream).await?;
@@ -368,8 +427,7 @@ async fn do_run(
             routes
                 .iter()
                 .find(|r| r["hostname"].as_str() == Some(&hostname))
-                .and_then(|r| r["port"].as_u64())
-                .and_then(|p| u16::try_from(p).ok())
+                .and_then(|r| serde_json::from_value::<crate::routes::Route>(r.clone()).ok())
         } else {
             None
         }
@@ -421,37 +479,66 @@ async fn do_run(
     //   4. No existing route        → find a free port
     let port = if let Some(explicit_port) = port_override {
         crate::ports::validate_app_port(explicit_port)?;
-        if let Some(_old_port) = reuse_port {
+        if existing_route.is_some() {
             let mut s = ipc_connect().await?;
-            write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
-            let _: crate::proto::Response = read_frame(&mut s).await?;
-            crate::ports::wait_for_port_free(
-                explicit_port,
-                std::time::Duration::from_secs(2),
+            write_frame(
+                &mut s,
+                &Command::Stop {
+                    hostname: hostname.clone(),
+                },
             )
-            .await;
+            .await?;
+            let _: crate::proto::Response = read_frame(&mut s).await?;
+            crate::ports::wait_for_port_free(explicit_port, std::time::Duration::from_secs(2))
+                .await;
         }
         explicit_port
     } else if let Some(dp) = declared_port {
-        if let Some(_old) = reuse_port {
+        if existing_route.is_some() {
             let mut s = ipc_connect().await?;
-            write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+            write_frame(
+                &mut s,
+                &Command::Stop {
+                    hostname: hostname.clone(),
+                },
+            )
+            .await?;
             let _: crate::proto::Response = read_frame(&mut s).await?;
             crate::ports::wait_for_port_free(dp, std::time::Duration::from_secs(2)).await;
         }
         dp
-    } else if let Some(old_port) = reuse_port {
+    } else if let Some(old_route) = existing_route.as_ref() {
         let mut s = ipc_connect().await?;
-        write_frame(&mut s, &Command::Stop { hostname: hostname.clone() }).await?;
+        write_frame(
+            &mut s,
+            &Command::Stop {
+                hostname: hostname.clone(),
+            },
+        )
+        .await?;
         let _: crate::proto::Response = read_frame(&mut s).await?;
-        crate::ports::wait_for_port_free(old_port, std::time::Duration::from_secs(2))
-            .await;
-        old_port
+        crate::ports::wait_for_port_free(old_route.port, std::time::Duration::from_secs(2)).await;
+        old_route.port
     } else {
-        crate::ports::find_free_port(
-            config.proxy.port_range.0,
-            config.proxy.port_range.1,
-        )?
+        crate::ports::find_free_port(config.proxy.port_range.0, config.proxy.port_range.1)?
+    };
+
+    let public_port = if tcp {
+        match existing_route.as_ref() {
+            Some(route)
+                if route.protocol == crate::routes::RouteProtocol::Tcp
+                    && route.public_port.is_some() =>
+            {
+                route.public_port
+            }
+            _ => Some(crate::ports::find_free_port_excluding(
+                config.proxy.port_range.0,
+                config.proxy.port_range.1,
+                &[port],
+            )?),
+        }
+    } else {
+        None
     };
 
     let injection = driver
@@ -460,14 +547,12 @@ async fn do_run(
 
     // Build env vars for the child process
     let port_env_name = config.project.port_env.as_deref().unwrap_or("PORT");
-    let mut extra_env: Vec<(String, String)> = vec![
-        (port_env_name.to_string(), port.to_string()),
-    ];
+    let mut extra_env: Vec<(String, String)> = vec![(port_env_name.to_string(), port.to_string())];
     if !tcp {
-        extra_env.push(("PORTAL_URL".to_string(), format!("https://{hostname}")));
+        extra_env.push(("PORTAL_URL".to_string(), public_url.clone()));
         // Inject NODE_EXTRA_CA_CERTS so Node.js child processes trust our local CA
         if config.proxy.https {
-            let ca_path = crate::config::dirs_for_state().join("ca.pem");
+            let ca_path = portal_ca_cert_path();
             if ca_path.exists() {
                 extra_env.push((
                     "NODE_EXTRA_CA_CERTS".to_string(),
@@ -478,9 +563,7 @@ async fn do_run(
     }
 
     let my_pid = std::process::id();
-    let mut child = crate::process::spawn_child(
-        &cwd, &args, port, injection, &extra_env,
-    ).await?;
+    let mut child = crate::process::spawn_child(&cwd, &args, port, injection, &extra_env).await?;
 
     // Register the route in the daemon's live in-memory store via IPC
     let child_pid = child.id().unwrap_or(my_pid);
@@ -490,21 +573,41 @@ async fn do_run(
             &Command::RegisterRoute {
                 hostname: hostname.clone(),
                 port,
+                public_port,
+                protocol: if tcp {
+                    crate::routes::RouteProtocol::Tcp
+                } else {
+                    crate::routes::RouteProtocol::Http
+                },
                 pid: child_pid,
                 cwd: cwd.to_string_lossy().to_string(),
             },
         )
         .await;
-        let _: crate::proto::Response = read_frame(&mut stream)
+        let response: crate::proto::Response = read_frame(&mut stream)
             .await
             .unwrap_or(crate::proto::Response::ok_empty());
+        if !response.ok {
+            let _ = crate::process::stop_child(&mut child).await;
+            return Err(crate::error::Error::Ipc(
+                response
+                    .error
+                    .unwrap_or_else(|| "failed to register route".to_string()),
+            ));
+        }
     }
 
     if !quiet {
         if tcp {
-            banner::print_tcp_banner(&hostname, port, child_pid, reuse_port.is_some());
+            banner::print_tcp_banner(
+                &hostname,
+                public_port.unwrap_or(port),
+                port,
+                child_pid,
+                existing_route.is_some(),
+            );
         } else {
-            banner::print_banner(&hostname, port, child_pid, reuse_port.is_some());
+            banner::print_banner(&public_url, port, child_pid, existing_route.is_some());
         }
     }
 
@@ -531,21 +634,144 @@ async fn ipc_connect() -> Result<tokio::net::UnixStream> {
         .map_err(|_| crate::error::Error::DaemonNotRunning)
 }
 
+fn build_public_url(config: &crate::config::Config, hostname: &str) -> String {
+    build_public_url_parts(
+        config.proxy.https,
+        hostname,
+        config.proxy.http_port,
+        config.proxy.https_port,
+    )
+}
+
+fn portal_ca_cert_path() -> std::path::PathBuf {
+    crate::config::dirs_for_state().join("certs").join("ca.pem")
+}
+
+fn build_public_url_parts(
+    https_enabled: bool,
+    hostname: &str,
+    http_port: u16,
+    https_port: u16,
+) -> String {
+    if https_enabled {
+        if https_port == 443 {
+            format!("https://{hostname}")
+        } else {
+            format!("https://{hostname}:{https_port}")
+        }
+    } else if http_port == 80 {
+        format!("http://{hostname}")
+    } else {
+        format!("http://{hostname}:{http_port}")
+    }
+}
+
+fn parse_command_line(input: &str) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut token_started = false;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active_quote) => match ch {
+                c if c == active_quote => quote = None,
+                '\\' if active_quote == '"' => {
+                    let escaped = chars.next().ok_or_else(|| {
+                        crate::error::Error::Ipc(
+                            "invalid trailing escape in start_command".to_string(),
+                        )
+                    })?;
+                    current.push(escaped);
+                    token_started = true;
+                }
+                _ => {
+                    current.push(ch);
+                    token_started = true;
+                }
+            },
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    token_started = true;
+                }
+                '\\' => {
+                    let escaped = chars.next().ok_or_else(|| {
+                        crate::error::Error::Ipc(
+                            "invalid trailing escape in start_command".to_string(),
+                        )
+                    })?;
+                    current.push(escaped);
+                    token_started = true;
+                }
+                c if c.is_whitespace() => {
+                    if token_started {
+                        args.push(std::mem::take(&mut current));
+                        token_started = false;
+                    }
+                }
+                _ => {
+                    current.push(ch);
+                    token_started = true;
+                }
+            },
+        }
+    }
+
+    if quote.is_some() {
+        return Err(crate::error::Error::Ipc(
+            "unterminated quote in start_command".to_string(),
+        ));
+    }
+
+    if token_started {
+        args.push(current);
+    }
+
+    if args.is_empty() {
+        return Err(crate::error::Error::Ipc(
+            "start_command did not produce any arguments".to_string(),
+        ));
+    }
+
+    Ok(args)
+}
+
+fn parse_start_command(driver_name: &str, raw_cmd: &str) -> Result<Vec<String>> {
+    parse_command_line(raw_cmd).map_err(|err| {
+        if driver_name == "portal.toml" {
+            crate::error::Error::Ipc(format!("invalid start_command in portal.toml: {err}"))
+        } else {
+            err
+        }
+    })
+}
+
 async fn ensure_daemon_running(
     config: &crate::config::Config,
     setup: &mut banner::SetupPrinter,
+    requirement: DaemonRequirement,
 ) -> Result<()> {
     let sock = crate::config::dirs_for_state().join("portal.sock");
 
-    // Fast path: daemon is already running — return immediately, no UI.
-    if tokio::net::UnixStream::connect(&sock).await.is_ok() {
-        return Ok(());
+    match probe_running_daemon(&sock).await {
+        Some(running_mode) if running_daemon_satisfies_requirement(running_mode, requirement) => {
+            return Ok(());
+        }
+        Some(crate::daemon::DaemonMode::TcpOnly) if requirement == DaemonRequirement::Full => {
+            shutdown_running_daemon(&sock).await?;
+        }
+        _ => {}
     }
 
     let exe = std::env::current_exe()?;
-    let needs_sudo = !cfg!(windows)
+    let mode = daemon_mode_for_requirement(requirement);
+    let needs_sudo = matches!(mode, crate::daemon::DaemonMode::Full)
+        && !cfg!(windows)
         && (config.proxy.http_port < 1024 || config.proxy.https_port < 1024);
-    let ca_missing = !crate::config::dirs_for_state().join("ca.pem").exists();
+    let ca_missing =
+        matches!(mode, crate::daemon::DaemonMode::Full) && !portal_ca_cert_path().exists();
 
     if needs_sudo {
         use std::io::IsTerminal;
@@ -599,6 +825,7 @@ async fn ensure_daemon_running(
         let status = tokio::process::Command::new("sudo")
             .arg(&exe)
             .arg("daemon")
+            .args(mode.daemon_args())
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
@@ -649,6 +876,7 @@ async fn ensure_daemon_running(
 
     if let Err(err) = std::process::Command::new(&exe)
         .arg("daemon")
+        .args(mode.daemon_args())
         .env("PORTAL_IS_DAEMON", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -691,6 +919,68 @@ async fn ensure_daemon_running(
         "{} daemon  failed to start",
         console::style("✗").red()
     ));
+    Err(crate::error::Error::DaemonNotRunning)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonRequirement {
+    Any,
+    Full,
+    TcpCapable,
+}
+
+fn daemon_mode_for_requirement(requirement: DaemonRequirement) -> crate::daemon::DaemonMode {
+    match requirement {
+        DaemonRequirement::Any | DaemonRequirement::Full => crate::daemon::DaemonMode::Full,
+        DaemonRequirement::TcpCapable => crate::daemon::DaemonMode::TcpOnly,
+    }
+}
+
+fn running_daemon_satisfies_requirement(
+    running: crate::daemon::DaemonMode,
+    requirement: DaemonRequirement,
+) -> bool {
+    match requirement {
+        DaemonRequirement::Any => true,
+        DaemonRequirement::Full => running == crate::daemon::DaemonMode::Full,
+        DaemonRequirement::TcpCapable => true,
+    }
+}
+
+async fn probe_running_daemon(sock: &std::path::Path) -> Option<crate::daemon::DaemonMode> {
+    let mut stream = tokio::net::UnixStream::connect(sock).await.ok()?;
+    write_frame(&mut stream, &Command::Status).await.ok()?;
+    let response: crate::proto::Response = read_frame(&mut stream).await.ok()?;
+    if !response.ok {
+        return None;
+    }
+    Some(daemon_mode_from_status(response.data.as_ref()))
+}
+
+fn daemon_mode_from_status(data: Option<&serde_json::Value>) -> crate::daemon::DaemonMode {
+    match data
+        .and_then(|value| value.get("mode"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("tcp_only") => crate::daemon::DaemonMode::TcpOnly,
+        _ => crate::daemon::DaemonMode::Full,
+    }
+}
+
+async fn shutdown_running_daemon(sock: &std::path::Path) -> Result<()> {
+    let mut stream = tokio::net::UnixStream::connect(sock)
+        .await
+        .map_err(|_| crate::error::Error::DaemonNotRunning)?;
+    write_frame(&mut stream, &Command::Shutdown).await?;
+    let _: crate::proto::Response = read_frame(&mut stream).await?;
+
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if tokio::net::UnixStream::connect(sock).await.is_err() {
+            return Ok(());
+        }
+    }
+
     Err(crate::error::Error::DaemonNotRunning)
 }
 
@@ -790,10 +1080,7 @@ fn parse_lsof_output(output: &str) -> Vec<PortOccupier> {
 
 /// Use `lsof` to discover which processes hold the given ports.
 fn discover_port_occupiers(ports: &[u16]) -> Vec<PortOccupier> {
-    let port_args: Vec<String> = ports
-        .iter()
-        .map(|p| format!("TCP:{p}"))
-        .collect();
+    let port_args: Vec<String> = ports.iter().map(|p| format!("TCP:{p}")).collect();
 
     // Build: lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN -F pcn
     let mut cmd = std::process::Command::new("lsof");
@@ -831,7 +1118,10 @@ fn show_conflict_menu(occupiers: &[PortOccupier]) -> crate::error::Result<Confli
     use dialoguer::{MultiSelect, Select};
 
     let port_list: Vec<String> = {
-        let mut all: Vec<u16> = occupiers.iter().flat_map(|o| o.ports.iter().copied()).collect();
+        let mut all: Vec<u16> = occupiers
+            .iter()
+            .flat_map(|o| o.ports.iter().copied())
+            .collect();
         all.sort_unstable();
         all.dedup();
         all.iter().map(|p| format!(":{p}")).collect()
@@ -845,11 +1135,13 @@ fn show_conflict_menu(occupiers: &[PortOccupier]) -> crate::error::Result<Confli
     let items: Vec<String> = occupiers
         .iter()
         .map(|o| {
-            let ports_str = o.ports.iter().map(|p| format!(":{p}")).collect::<Vec<_>>().join(" ");
-            format!(
-                "{:<14} pid {:<8} {}",
-                o.name, o.pid, ports_str
-            )
+            let ports_str = o
+                .ports
+                .iter()
+                .map(|p| format!(":{p}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{:<14} pid {:<8} {}", o.name, o.pid, ports_str)
         })
         .collect();
 
@@ -941,23 +1233,24 @@ fn injection_toml_fields(
     match injection {
         crate::detect::PortInjection::EnvOnly => (None, None, None),
         crate::detect::PortInjection::CliArgs(args) => {
-            let port_flag = args.windows(2)
-                .find(|w| w[1] == "0")
-                .map(|w| w[0].clone());
-            let host_flag = args.windows(2)
+            let port_flag = args.windows(2).find(|w| w[1] == "0").map(|w| w[0].clone());
+            let host_flag = args
+                .windows(2)
                 .find(|w| w[1] == "0.0.0.0")
                 .map(|w| w[0].clone());
             (port_flag, host_flag, None)
         }
-        crate::detect::PortInjection::AppendAddress(_) => {
-            (None, None, Some("append".to_string()))
-        }
+        crate::detect::PortInjection::AppendAddress(_) => (None, None, Some("append".to_string())),
     }
 }
 
-fn prompt_manual_config() -> crate::error::Result<
-    (String, Option<String>, Option<String>, Option<String>, Option<String>)
-> {
+fn prompt_manual_config() -> crate::error::Result<(
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
     let cmd: String = dialoguer::Input::new()
         .with_prompt("What command starts your dev server?")
         .interact_text()
@@ -979,7 +1272,7 @@ fn prompt_manual_config() -> crate::error::Result<
 
     let (pa, ha, pp) = match choice {
         0 => (Some("--port".to_string()), None, None),
-        1 => (Some("-p".to_string()),     None, None),
+        1 => (Some("-p".to_string()), None, None),
         2 => (None, None, Some("append".to_string())),
         3 => (None, None, None),
         _ => (None, None, None),
@@ -1074,5 +1367,85 @@ mod tests {
     fn test_parse_lsof_empty_output() {
         let occupiers = parse_lsof_output("");
         assert!(occupiers.is_empty());
+    }
+
+    #[test]
+    fn parse_command_line_preserves_quotes() {
+        let args =
+            parse_command_line(r#"python -m uvicorn "app.main:create_app()" --factory"#).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "python",
+                "-m",
+                "uvicorn",
+                "app.main:create_app()",
+                "--factory",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_command_line_supports_escaped_spaces() {
+        let args = parse_command_line(r#"python path\ with\ spaces/app.py"#).unwrap();
+        assert_eq!(args, vec!["python", "path with spaces/app.py"]);
+    }
+
+    #[test]
+    fn build_public_url_includes_non_default_https_port() {
+        assert_eq!(
+            build_public_url_parts(true, "myapp.localhost", 80, 4443),
+            "https://myapp.localhost:4443"
+        );
+    }
+
+    #[test]
+    fn build_public_url_uses_http_when_https_disabled() {
+        assert_eq!(
+            build_public_url_parts(false, "myapp.localhost", 8080, 4443),
+            "http://myapp.localhost:8080"
+        );
+    }
+
+    #[test]
+    fn portal_ca_cert_path_points_into_certs_directory() {
+        let path = portal_ca_cert_path();
+        assert!(path.ends_with("certs/ca.pem"));
+    }
+
+    #[test]
+    fn daemon_mode_defaults_to_full_when_status_has_no_mode() {
+        assert_eq!(
+            daemon_mode_from_status(None),
+            crate::daemon::DaemonMode::Full
+        );
+        assert_eq!(
+            daemon_mode_from_status(Some(&serde_json::json!({ "https": true }))),
+            crate::daemon::DaemonMode::Full
+        );
+    }
+
+    #[test]
+    fn daemon_mode_reads_tcp_only_status() {
+        assert_eq!(
+            daemon_mode_from_status(Some(&serde_json::json!({ "mode": "tcp_only" }))),
+            crate::daemon::DaemonMode::TcpOnly
+        );
+    }
+
+    #[test]
+    fn tcp_requirement_accepts_full_or_tcp_only_daemon() {
+        assert!(running_daemon_satisfies_requirement(
+            crate::daemon::DaemonMode::Full,
+            DaemonRequirement::TcpCapable
+        ));
+        assert!(running_daemon_satisfies_requirement(
+            crate::daemon::DaemonMode::TcpOnly,
+            DaemonRequirement::TcpCapable
+        ));
+        assert!(!running_daemon_satisfies_requirement(
+            crate::daemon::DaemonMode::TcpOnly,
+            DaemonRequirement::Full
+        ));
     }
 }

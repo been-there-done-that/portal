@@ -11,8 +11,7 @@ pub struct Db(Arc<Mutex<Connection>>);
 
 impl Db {
     pub fn open(path: PathBuf) -> crate::error::Result<Self> {
-        let conn = Connection::open(&path)
-            .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
+        let conn = Connection::open(&path).map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
@@ -221,7 +220,9 @@ mod tests {
         db.insert(&req).unwrap();
         req.hostname = "other.localhost".to_string();
         db.insert(&req).unwrap();
-        let page = db.query_page(Some("myapp.localhost"), None, 10, None).unwrap();
+        let page = db
+            .query_page(Some("myapp.localhost"), None, 10, None)
+            .unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].hostname, "myapp.localhost");
     }

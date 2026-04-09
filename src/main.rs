@@ -12,6 +12,7 @@ mod process;
 mod proto;
 mod proxy;
 mod routes;
+mod tcp;
 
 use clap::Parser;
 use error::Result;

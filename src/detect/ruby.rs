@@ -1,5 +1,5 @@
+use crate::detect::{file_contains, LanguageDriver, PortInjection};
 use std::path::Path;
-use crate::detect::{LanguageDriver, PortInjection, file_contains};
 
 pub struct RailsDriver;
 
@@ -7,18 +7,26 @@ impl LanguageDriver for RailsDriver {
     fn detect(&self, cwd: &Path) -> bool {
         file_contains(cwd, "Gemfile", "rails")
     }
-    fn priority(&self) -> u8 { 70 }
-    fn name(&self) -> &'static str { "Rails (Ruby)" }
+    fn priority(&self) -> u8 {
+        70
+    }
+    fn name(&self) -> &'static str {
+        "Rails (Ruby)"
+    }
     fn project_name(&self, cwd: &Path) -> Option<String> {
-        cwd.file_name()?.to_str().map(crate::detect::sanitize_hostname)
+        cwd.file_name()?
+            .to_str()
+            .map(crate::detect::sanitize_hostname)
     }
     fn start_command(&self, _cwd: &Path) -> Option<String> {
         Some("rails server".to_string())
     }
     fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
         PortInjection::CliArgs(vec![
-            "-p".to_string(), port.to_string(),
-            "-b".to_string(), "0.0.0.0".to_string(),
+            "-p".to_string(),
+            port.to_string(),
+            "-b".to_string(),
+            "0.0.0.0".to_string(),
         ])
     }
 }
@@ -29,18 +37,26 @@ impl LanguageDriver for RackDriver {
     fn detect(&self, cwd: &Path) -> bool {
         cwd.join("Gemfile").exists() && !file_contains(cwd, "Gemfile", "rails")
     }
-    fn priority(&self) -> u8 { 70 }
-    fn name(&self) -> &'static str { "Rack (Ruby)" }
+    fn priority(&self) -> u8 {
+        70
+    }
+    fn name(&self) -> &'static str {
+        "Rack (Ruby)"
+    }
     fn project_name(&self, cwd: &Path) -> Option<String> {
-        cwd.file_name()?.to_str().map(crate::detect::sanitize_hostname)
+        cwd.file_name()?
+            .to_str()
+            .map(crate::detect::sanitize_hostname)
     }
     fn start_command(&self, _cwd: &Path) -> Option<String> {
         Some("bundle exec rackup".to_string())
     }
     fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
         PortInjection::CliArgs(vec![
-            "-p".to_string(), port.to_string(),
-            "-o".to_string(), "0.0.0.0".to_string(),
+            "-p".to_string(),
+            port.to_string(),
+            "-o".to_string(),
+            "0.0.0.0".to_string(),
         ])
     }
 }
@@ -48,8 +64,8 @@ impl LanguageDriver for RackDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn rails_detects_gemfile_with_rails() {

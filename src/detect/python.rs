@@ -1,5 +1,5 @@
+use crate::detect::{file_contains, read_toml_field, LanguageDriver, PortInjection};
 use std::path::Path;
-use crate::detect::{LanguageDriver, PortInjection, read_toml_field, file_contains};
 
 // ─── DjangoDriver ─────────────────────────────────────────────────────────────
 
@@ -9,8 +9,12 @@ impl LanguageDriver for DjangoDriver {
     fn detect(&self, cwd: &Path) -> bool {
         cwd.join("manage.py").exists()
     }
-    fn priority(&self) -> u8 { 90 }
-    fn name(&self) -> &'static str { "Django (Python)" }
+    fn priority(&self) -> u8 {
+        90
+    }
+    fn name(&self) -> &'static str {
+        "Django (Python)"
+    }
     fn project_name(&self, cwd: &Path) -> Option<String> {
         read_toml_field(cwd, "pyproject.toml", &["project", "name"])
     }
@@ -33,8 +37,12 @@ impl LanguageDriver for UvicornDriver {
             || file_contains(cwd, "requirements.txt", "uvicorn")
             || file_contains(cwd, "requirements.txt", "fastapi")
     }
-    fn priority(&self) -> u8 { 80 }
-    fn name(&self) -> &'static str { "uvicorn/FastAPI (Python)" }
+    fn priority(&self) -> u8 {
+        80
+    }
+    fn name(&self) -> &'static str {
+        "uvicorn/FastAPI (Python)"
+    }
     fn project_name(&self, cwd: &Path) -> Option<String> {
         read_toml_field(cwd, "pyproject.toml", &["project", "name"])
     }
@@ -43,8 +51,10 @@ impl LanguageDriver for UvicornDriver {
     }
     fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
         PortInjection::CliArgs(vec![
-            "--host".to_string(), "0.0.0.0".to_string(),
-            "--port".to_string(), port.to_string(),
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+            "--port".to_string(),
+            port.to_string(),
         ])
     }
 }
@@ -60,8 +70,12 @@ impl LanguageDriver for FlaskDriver {
             || cwd.join("app.py").exists()
             || cwd.join("wsgi.py").exists()
     }
-    fn priority(&self) -> u8 { 80 }
-    fn name(&self) -> &'static str { "Flask (Python)" }
+    fn priority(&self) -> u8 {
+        80
+    }
+    fn name(&self) -> &'static str {
+        "Flask (Python)"
+    }
     fn project_name(&self, cwd: &Path) -> Option<String> {
         read_toml_field(cwd, "pyproject.toml", &["project", "name"])
     }
@@ -70,8 +84,10 @@ impl LanguageDriver for FlaskDriver {
     }
     fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
         PortInjection::CliArgs(vec![
-            "--host".to_string(), "0.0.0.0".to_string(),
-            "--port".to_string(), port.to_string(),
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+            "--port".to_string(),
+            port.to_string(),
         ])
     }
 }
@@ -79,8 +95,8 @@ impl LanguageDriver for FlaskDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn django_detects_manage_py() {
@@ -117,7 +133,11 @@ mod tests {
     #[test]
     fn uvicorn_detects_from_requirements_txt() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("requirements.txt"), "fastapi\nuvicorn[standard]\n").unwrap();
+        fs::write(
+            tmp.path().join("requirements.txt"),
+            "fastapi\nuvicorn[standard]\n",
+        )
+        .unwrap();
         assert!(UvicornDriver.detect(tmp.path()));
     }
 

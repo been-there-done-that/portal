@@ -445,10 +445,14 @@ tld = "test"
     fn port_env_can_be_overridden_via_toml() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().join("portal.toml");
-        std::fs::write(&project_path, r#"
+        std::fs::write(
+            &project_path,
+            r#"
 [project]
 port_env = "APP_PORT"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let config = Config::load_with_paths(None, Some(project_path), &[]).unwrap();
         assert_eq!(config.project.port_env, Some("APP_PORT".to_string()));
     }

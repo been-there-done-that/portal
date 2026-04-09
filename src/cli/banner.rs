@@ -9,7 +9,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 ///   https://myapp.localhost
 ///   └─ localhost:4123  ·  cert ✓  ·  pid 91842
 /// ```
-pub fn print_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
+pub fn print_banner(public_url: &str, port: u16, pid: u32, replaced: bool) {
     let version = env!("CARGO_PKG_VERSION");
     let badge = style(" portal ").bold().white().on_blue();
     let ver = style(format!("v{version}")).dim();
@@ -20,7 +20,7 @@ pub fn print_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
     };
     eprintln!("  {badge}  {ver}  ·  {status_dot}");
     eprintln!();
-    eprintln!("  {}", style(format!("https://{hostname}")).bold().white());
+    eprintln!("  {}", style(public_url).bold().white());
     eprintln!(
         "  {}{}  ·  {}  ·  {}",
         style("└─ localhost:").dim(),
@@ -36,9 +36,15 @@ pub fn print_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
 ///   portal  v1.0.0  ·  ● running
 ///
 ///   redis.localhost  [TCP]
-///   └─ localhost:4001  ·  pid 99999
+///   └─ localhost:46379  →  localhost:4001  ·  pid 99999
 /// ```
-pub fn print_tcp_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
+pub fn print_tcp_banner(
+    hostname: &str,
+    public_port: u16,
+    backend_port: u16,
+    pid: u32,
+    replaced: bool,
+) {
     let version = env!("CARGO_PKG_VERSION");
     let badge = style(" portal ").bold().white().on_blue();
     let ver = style(format!("v{version}")).dim();
@@ -55,9 +61,12 @@ pub fn print_tcp_banner(hostname: &str, port: u16, pid: u32, replaced: bool) {
         style("[TCP]").cyan()
     );
     eprintln!(
-        "  {}{}  ·  {}",
+        "  {}{}  {}  {}{}  ·  {}",
         style("└─ localhost:").dim(),
-        style(port.to_string()).red(),
+        style(public_port.to_string()).red(),
+        style("→").dim(),
+        style("└─ localhost:").dim(),
+        style(backend_port.to_string()).red(),
         style(format!("pid {pid}")).dim(),
     );
 }
@@ -97,7 +106,9 @@ impl SetupPrinter {
     }
 
     fn ensure_header(&mut self) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         if !self.started {
             self.started = true;
             let version = env!("CARGO_PKG_VERSION");
@@ -116,9 +127,7 @@ impl SetupPrinter {
         let pb = self.mp.add(ProgressBar::new_spinner());
         let spinner_style = ProgressStyle::with_template("  {spinner:.cyan} {msg}")
             .expect("invalid spinner template")
-            .tick_strings(&[
-                "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-            ]);
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
         pb.set_style(spinner_style);
         pb.set_message(format!("{:<8} {}", name, msg));
         pb.enable_steady_tick(std::time::Duration::from_millis(80));
@@ -126,7 +135,9 @@ impl SetupPrinter {
     }
 
     pub fn plain_step(&mut self, msg: &str) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         self.ensure_header();
         eprintln!("  {}", console::style(msg).dim());
     }
@@ -134,7 +145,9 @@ impl SetupPrinter {
     /// Print the `╰─ ready` footer and clear the MultiProgress.
     /// No-op if no steps were started (nothing to display).
     pub fn done(self) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         if self.started {
             eprintln!("  {}", style("╰─ ready").dim());
             eprintln!();
@@ -143,7 +156,9 @@ impl SetupPrinter {
 }
 
 impl Default for SetupPrinter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -161,11 +176,11 @@ mod tests {
 
     #[test]
     fn print_tcp_banner_does_not_panic() {
-        print_tcp_banner("redis.localhost", 4001, 99999, false);
+        print_tcp_banner("redis.localhost", 46379, 4001, 99999, false);
     }
 
     #[test]
     fn print_tcp_banner_replaced_does_not_panic() {
-        print_tcp_banner("redis.localhost", 4001, 99999, true);
+        print_tcp_banner("redis.localhost", 46379, 4001, 99999, true);
     }
 }

@@ -64,6 +64,26 @@ pub fn find_free_port(lo: u16, hi: u16) -> Result<u16> {
     Err(crate::error::Error::NoFreePort(lo, hi))
 }
 
+pub fn find_free_port_excluding(lo: u16, hi: u16, excluded: &[u16]) -> Result<u16> {
+    let mut ports: Vec<u16> = (lo..=hi).collect();
+
+    let mut rng = rand::thread_rng();
+    ports.shuffle(&mut rng);
+
+    for port in ports {
+        if excluded.contains(&port) || is_browser_blocked(port) || port < 1024 {
+            continue;
+        }
+
+        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{port}")) {
+            drop(listener);
+            return Ok(port);
+        }
+    }
+
+    Err(crate::error::Error::NoFreePort(lo, hi))
+}
+
 /// Poll until `port` is no longer accepting connections (i.e., the previous
 /// process has released it), or until `timeout` elapses.
 /// Never returns an error — on timeout it simply returns so the caller can
@@ -162,7 +182,10 @@ mod tests {
     fn validate_rejects_browser_blocked_irc_ports() {
         for port in [6665u16, 6666, 6667, 6668, 6669] {
             let err = validate_app_port(port).unwrap_err();
-            assert!(err.to_string().contains("blocked"), "port {port} should be blocked");
+            assert!(
+                err.to_string().contains("blocked"),
+                "port {port} should be blocked"
+            );
         }
     }
 
@@ -171,6 +194,12 @@ mod tests {
         assert!(validate_app_port(4000).is_ok());
         assert!(validate_app_port(3000).is_ok());
         assert!(validate_app_port(8080).is_ok());
+    }
+
+    #[test]
+    fn excludes_specific_ports_when_searching() {
+        let port = find_free_port_excluding(4300, 4310, &[4305]).unwrap();
+        assert_ne!(port, 4305);
     }
 
     #[tokio::test]
@@ -204,11 +233,13 @@ mod tests {
 
         assert!(
             elapsed >= std::time::Duration::from_millis(100),
-            "should have waited for port to be released, returned after only {:?}", elapsed
+            "should have waited for port to be released, returned after only {:?}",
+            elapsed
         );
         assert!(
             elapsed < std::time::Duration::from_millis(900),
-            "should have returned promptly after release, waited {:?}", elapsed
+            "should have returned promptly after release, waited {:?}",
+            elapsed
         );
     }
 

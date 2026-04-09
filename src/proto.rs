@@ -31,6 +31,8 @@ pub enum Command {
     RegisterRoute {
         hostname: String,
         port: u16,
+        public_port: Option<u16>,
+        protocol: crate::routes::RouteProtocol,
         pid: u32,
         cwd: String,
     },
@@ -87,8 +89,8 @@ where
     T: Serialize,
 {
     let json = serde_json::to_string(value)?;
-    let len = u32::try_from(json.len())
-        .map_err(|_| Error::Ipc("frame payload too large".to_string()))?;
+    let len =
+        u32::try_from(json.len()).map_err(|_| Error::Ipc("frame payload too large".to_string()))?;
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&len.to_be_bytes());
 
@@ -109,7 +111,9 @@ where
     const MAX_FRAME_LEN: usize = 1 * 1024 * 1024; // 1 MiB
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME_LEN {
-        return Err(Error::Ipc(format!("frame too large: {len} bytes (max {MAX_FRAME_LEN})")));
+        return Err(Error::Ipc(format!(
+            "frame too large: {len} bytes (max {MAX_FRAME_LEN})"
+        )));
     }
 
     let mut payload = vec![0u8; len];
@@ -232,5 +236,36 @@ mod tests {
         let json = serde_json::to_string(&cmd).expect("serialize");
         let back: Command = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(back, Command::HostsClean));
+    }
+
+    #[test]
+    fn round_trips_register_route_with_protocol() {
+        let cmd = Command::RegisterRoute {
+            hostname: "redis.localhost".to_string(),
+            port: 6379,
+            public_port: Some(46379),
+            protocol: crate::routes::RouteProtocol::Tcp,
+            pid: 123,
+            cwd: "/tmp".to_string(),
+        };
+
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let back: Command = serde_json::from_str(&json).expect("deserialize");
+
+        match back {
+            Command::RegisterRoute {
+                hostname,
+                port,
+                public_port,
+                protocol,
+                ..
+            } => {
+                assert_eq!(hostname, "redis.localhost");
+                assert_eq!(port, 6379);
+                assert_eq!(public_port, Some(46379));
+                assert_eq!(protocol, crate::routes::RouteProtocol::Tcp);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

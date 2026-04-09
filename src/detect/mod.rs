@@ -1,18 +1,22 @@
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 // ─── Trait ───────────────────────────────────────────────────────────────────
 
 pub trait LanguageDriver: Send + Sync {
     fn detect(&self, cwd: &Path) -> bool;
-    fn priority(&self) -> u8 { 50 }
+    fn priority(&self) -> u8 {
+        50
+    }
     fn name(&self) -> &'static str;
     fn project_name(&self, cwd: &Path) -> Option<String>;
     fn start_command(&self, cwd: &Path) -> Option<String>;
     fn port_injection(&self, cwd: &Path, port: u16) -> PortInjection;
     /// Return (service_name, host_port) pairs for services that declare port mappings.
     /// Default is empty — most drivers do not use this.
-    fn service_port_candidates(&self, _cwd: &Path) -> Vec<(String, u16)> { vec![] }
+    fn service_port_candidates(&self, _cwd: &Path) -> Vec<(String, u16)> {
+        vec![]
+    }
 }
 
 // ─── Port injection strategy ─────────────────────────────────────────────────
@@ -35,7 +39,9 @@ impl DriverRegistry {
     pub fn new(config: &crate::config::Config) -> Self {
         let mut reg = Self {
             drivers: vec![
-                Box::new(PortalTomlDriver { config: config.project.clone() }),
+                Box::new(PortalTomlDriver {
+                    config: config.project.clone(),
+                }),
                 Box::new(python::DjangoDriver),
                 Box::new(python::UvicornDriver),
                 Box::new(python::FlaskDriver),
@@ -58,7 +64,10 @@ impl DriverRegistry {
     }
 
     pub fn detect(&self, cwd: &Path) -> Option<&dyn LanguageDriver> {
-        self.drivers.iter().find(|d| d.detect(cwd)).map(|d| d.as_ref())
+        self.drivers
+            .iter()
+            .find(|d| d.detect(cwd))
+            .map(|d| d.as_ref())
     }
 
     pub fn detect_language(&self, cwd: &Path) -> Option<&dyn LanguageDriver> {
@@ -92,20 +101,28 @@ pub fn infer_project_name(cwd: &Path, override_name: Option<&str>) -> String {
         return sanitize_hostname(name);
     }
     if let Some(n) = read_json_field(cwd, "package.json", "name") {
-        if !n.is_empty() { return sanitize_hostname(&n); }
+        if !n.is_empty() {
+            return sanitize_hostname(&n);
+        }
     }
     if let Some(n) = read_toml_field(cwd, "pyproject.toml", &["project", "name"]) {
-        if !n.is_empty() { return sanitize_hostname(&n); }
+        if !n.is_empty() {
+            return sanitize_hostname(&n);
+        }
     }
     if let Some(n) = read_toml_field(cwd, "Cargo.toml", &["package", "name"]) {
-        if !n.is_empty() { return sanitize_hostname(&n); }
+        if !n.is_empty() {
+            return sanitize_hostname(&n);
+        }
     }
     if let Some(n) = read_go_module_name(cwd) {
         return sanitize_hostname(&n);
     }
     if let Some(n) = read_json_field(cwd, "composer.json", "name") {
         let segment = n.split('/').last().unwrap_or(&n).to_string();
-        if !segment.is_empty() { return sanitize_hostname(&segment); }
+        if !segment.is_empty() {
+            return sanitize_hostname(&segment);
+        }
     }
     cwd.file_name()
         .and_then(|n| n.to_str())
@@ -120,7 +137,10 @@ pub fn resolve_hostname(cwd: &Path, override_name: Option<&str>, tld: &str) -> S
         if metadata.is_file() {
             if let Ok(contents) = fs::read_to_string(&git_path) {
                 if let Some(gitdir_line) = contents.lines().find(|l| l.starts_with("gitdir:")) {
-                    let gitdir_path = gitdir_line.strip_prefix("gitdir:").map(|s| s.trim()).unwrap_or("");
+                    let gitdir_path = gitdir_line
+                        .strip_prefix("gitdir:")
+                        .map(|s| s.trim())
+                        .unwrap_or("");
                     let gitdir_abs = if Path::new(gitdir_path).is_absolute() {
                         std::path::PathBuf::from(gitdir_path)
                     } else {
@@ -128,7 +148,8 @@ pub fn resolve_hostname(cwd: &Path, override_name: Option<&str>, tld: &str) -> S
                     };
                     let head_path = gitdir_abs.join("HEAD");
                     if let Ok(head_contents) = fs::read_to_string(&head_path) {
-                        let branch = head_contents.trim()
+                        let branch = head_contents
+                            .trim()
                             .strip_prefix("ref: refs/heads/")
                             .unwrap_or(&head_contents);
                         return format!("{}-{}.{}", sanitize_hostname(branch), project_name, tld);
@@ -173,18 +194,18 @@ fn read_go_module_name(cwd: &Path) -> Option<String> {
 
 // ─── Re-exports used by cli/mod.rs ───────────────────────────────────────────
 
-pub use node::{resolve_run_args, KNOWN_RUNNERS, is_known_runner};
+pub use node::{is_known_runner, resolve_run_args, KNOWN_RUNNERS};
 
 // ─── Sub-modules ─────────────────────────────────────────────────────────────
 
-pub mod node;
-pub mod python;
+pub mod docker_compose;
 pub mod go;
+pub mod node;
+pub mod php;
+pub mod python;
 pub mod ruby;
 pub mod rust;
-pub mod php;
 pub mod storybook;
-pub mod docker_compose;
 
 // ─── PortalTomlDriver ────────────────────────────────────────────────────────
 
@@ -198,8 +219,12 @@ impl LanguageDriver for PortalTomlDriver {
             || self.config.port_arg.is_some()
             || self.config.port_position.is_some()
     }
-    fn priority(&self) -> u8 { 255 }
-    fn name(&self) -> &'static str { "portal.toml" }
+    fn priority(&self) -> u8 {
+        255
+    }
+    fn name(&self) -> &'static str {
+        "portal.toml"
+    }
     fn project_name(&self, _cwd: &Path) -> Option<String> {
         self.config.name.clone()
     }
@@ -208,7 +233,12 @@ impl LanguageDriver for PortalTomlDriver {
     }
     fn port_injection(&self, _cwd: &Path, port: u16) -> PortInjection {
         // {port} in start_command → caller substitutes; no extra injection needed
-        if self.config.start_command.as_deref().map_or(false, |c| c.contains("{port}")) {
+        if self
+            .config
+            .start_command
+            .as_deref()
+            .map_or(false, |c| c.contains("{port}"))
+        {
             return PortInjection::EnvOnly;
         }
         if let Some(ref arg) = self.config.port_arg {
@@ -235,10 +265,18 @@ mod tests {
 
     struct AlwaysDriver;
     impl LanguageDriver for AlwaysDriver {
-        fn detect(&self, _: &Path) -> bool { true }
-        fn name(&self) -> &'static str { "always" }
-        fn project_name(&self, _: &Path) -> Option<String> { None }
-        fn start_command(&self, _: &Path) -> Option<String> { Some("echo hi".to_string()) }
+        fn detect(&self, _: &Path) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "always"
+        }
+        fn project_name(&self, _: &Path) -> Option<String> {
+            None
+        }
+        fn start_command(&self, _: &Path) -> Option<String> {
+            Some("echo hi".to_string())
+        }
         fn port_injection(&self, _: &Path, port: u16) -> PortInjection {
             PortInjection::CliArgs(vec!["--port".to_string(), port.to_string()])
         }
@@ -246,16 +284,28 @@ mod tests {
 
     struct NeverDriver;
     impl LanguageDriver for NeverDriver {
-        fn detect(&self, _: &Path) -> bool { false }
-        fn name(&self) -> &'static str { "never" }
-        fn project_name(&self, _: &Path) -> Option<String> { None }
-        fn start_command(&self, _: &Path) -> Option<String> { None }
-        fn port_injection(&self, _: &Path, _: u16) -> PortInjection { PortInjection::EnvOnly }
+        fn detect(&self, _: &Path) -> bool {
+            false
+        }
+        fn name(&self) -> &'static str {
+            "never"
+        }
+        fn project_name(&self, _: &Path) -> Option<String> {
+            None
+        }
+        fn start_command(&self, _: &Path) -> Option<String> {
+            None
+        }
+        fn port_injection(&self, _: &Path, _: u16) -> PortInjection {
+            PortInjection::EnvOnly
+        }
     }
 
     #[test]
     fn registry_returns_none_when_no_match() {
-        let reg = DriverRegistry { drivers: vec![Box::new(NeverDriver)] };
+        let reg = DriverRegistry {
+            drivers: vec![Box::new(NeverDriver)],
+        };
         let tmp = TempDir::new().unwrap();
         assert!(reg.detect(tmp.path()).is_none());
     }
@@ -273,12 +323,24 @@ mod tests {
     fn registry_respects_priority_order() {
         struct PrioDriver(u8, &'static str);
         impl LanguageDriver for PrioDriver {
-            fn detect(&self, _: &Path) -> bool { true }
-            fn priority(&self) -> u8 { self.0 }
-            fn name(&self) -> &'static str { self.1 }
-            fn project_name(&self, _: &Path) -> Option<String> { None }
-            fn start_command(&self, _: &Path) -> Option<String> { None }
-            fn port_injection(&self, _: &Path, _: u16) -> PortInjection { PortInjection::EnvOnly }
+            fn detect(&self, _: &Path) -> bool {
+                true
+            }
+            fn priority(&self) -> u8 {
+                self.0
+            }
+            fn name(&self) -> &'static str {
+                self.1
+            }
+            fn project_name(&self, _: &Path) -> Option<String> {
+                None
+            }
+            fn start_command(&self, _: &Path) -> Option<String> {
+                None
+            }
+            fn port_injection(&self, _: &Path, _: u16) -> PortInjection {
+                PortInjection::EnvOnly
+            }
         }
         let mut reg = DriverRegistry {
             drivers: vec![
@@ -382,7 +444,10 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.project.start_command = Some("my-custom-server".to_string());
         let reg = DriverRegistry::new(&cfg);
-        assert_eq!(reg.detect_language(tmp.path()).unwrap().name(), "Django (Python)");
+        assert_eq!(
+            reg.detect_language(tmp.path()).unwrap().name(),
+            "Django (Python)"
+        );
     }
 
     #[test]
@@ -399,7 +464,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{"name":"ui","scripts":{"dev":"vite","storybook":"storybook dev"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         fs::create_dir(tmp.path().join(".storybook")).unwrap();
         let cfg = crate::config::Config::default();
         let reg = DriverRegistry::new(&cfg);
@@ -414,7 +480,10 @@ mod tests {
         let cfg = crate::config::Config::default();
         let reg = DriverRegistry::new(&cfg);
         let driver = reg.detect(tmp.path()).unwrap();
-        assert_eq!(driver.project_name(tmp.path()), Some("my-ui-storybook".to_string()));
+        assert_eq!(
+            driver.project_name(tmp.path()),
+            Some("my-ui-storybook".to_string())
+        );
     }
 
     #[test]
@@ -430,7 +499,10 @@ mod tests {
         };
         let driver = PortalTomlDriver { config: cfg };
         let tmp = TempDir::new().unwrap();
-        assert!(matches!(driver.port_injection(tmp.path(), 4123), PortInjection::EnvOnly));
+        assert!(matches!(
+            driver.port_injection(tmp.path(), 4123),
+            PortInjection::EnvOnly
+        ));
     }
 
     #[test]
@@ -446,12 +518,16 @@ mod tests {
     #[test]
     fn registry_docker_compose_service_port_candidates_via_trait() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("docker-compose.yml"), r#"
+        fs::write(
+            tmp.path().join("docker-compose.yml"),
+            r#"
 services:
   web:
     ports:
       - "3000:80"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let cfg = crate::config::Config::default();
         let reg = DriverRegistry::new(&cfg);
         let driver = reg.detect(tmp.path()).unwrap();

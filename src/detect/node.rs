@@ -1,10 +1,10 @@
+use crate::detect::{LanguageDriver, PortInjection};
 use std::fs;
 use std::path::Path;
-use crate::detect::{LanguageDriver, PortInjection};
 
 pub const KNOWN_RUNNERS: &[&str] = &[
-    "npm", "pnpm", "yarn", "bun", "node", "deno", "npx", "bunx", "pnpx",
-    "python", "python3", "ruby", "go", "cargo", "java", "sh", "bash", "zsh", "fish",
+    "npm", "pnpm", "yarn", "bun", "node", "deno", "npx", "bunx", "pnpx", "python", "python3",
+    "ruby", "go", "cargo", "java", "sh", "bash", "zsh", "fish",
 ];
 
 pub fn is_known_runner(cmd: &str) -> bool {
@@ -12,17 +12,27 @@ pub fn is_known_runner(cmd: &str) -> bool {
 }
 
 pub(crate) fn detect_package_manager(cwd: &Path) -> &'static str {
-    if cwd.join("pnpm-lock.yaml").exists() { return "pnpm"; }
-    if cwd.join("bun.lockb").exists() || cwd.join("bun.lock").exists() { return "bun"; }
-    if cwd.join("yarn.lock").exists() { return "yarn"; }
+    if cwd.join("pnpm-lock.yaml").exists() {
+        return "pnpm";
+    }
+    if cwd.join("bun.lockb").exists() || cwd.join("bun.lock").exists() {
+        return "bun";
+    }
+    if cwd.join("yarn.lock").exists() {
+        return "yarn";
+    }
     "npm"
 }
 
 fn pick_dev_script(json: &serde_json::Value) -> Option<String> {
     let scripts = json.get("scripts")?.as_object()?;
-    if scripts.is_empty() { return None; }
+    if scripts.is_empty() {
+        return None;
+    }
     for &preferred in &["dev", "start", "serve", "develop"] {
-        if scripts.contains_key(preferred) { return Some(preferred.to_string()); }
+        if scripts.contains_key(preferred) {
+            return Some(preferred.to_string());
+        }
     }
     scripts.keys().min().cloned()
 }
@@ -32,12 +42,19 @@ pub fn resolve_run_args(cwd: &Path, args: Vec<String>) -> Vec<String> {
         Some(f) => f.clone(),
         None => return args,
     };
-    if is_known_runner(&first) { return args; }
+    if is_known_runner(&first) {
+        return args;
+    }
     let pkg_path = cwd.join("package.json");
     let script_exists = pkg_path.exists() && {
-        fs::read_to_string(&pkg_path).ok()
+        fs::read_to_string(&pkg_path)
+            .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|j| j.get("scripts").and_then(|s| s.as_object()).map(|m| m.contains_key(first.as_str())))
+            .and_then(|j| {
+                j.get("scripts")
+                    .and_then(|s| s.as_object())
+                    .map(|m| m.contains_key(first.as_str()))
+            })
             .unwrap_or(false)
     };
     if script_exists {
@@ -53,26 +70,37 @@ pub fn resolve_run_args(cwd: &Path, args: Vec<String>) -> Vec<String> {
 // JS framework detection for port injection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Framework {
-    Vite, Astro, Angular, ReactRouter, Expo, Nuxt, Remix, SvelteKit, Unknown,
+    Vite,
+    Astro,
+    Angular,
+    ReactRouter,
+    Expo,
+    Nuxt,
+    Remix,
+    SvelteKit,
+    Unknown,
 }
 
 impl Framework {
     fn extra_args(&self, port: u16) -> Vec<String> {
         let p = port.to_string();
         match self {
-            Framework::Vite     => vec!["--port".into(), p, "--host".into()],
-            Framework::Astro    => vec!["--port".into(), p, "--host".into(), "0.0.0.0".into()],
-            Framework::Angular  => vec!["--port".into(), p, "--host".into(), "0.0.0.0".into()],
+            Framework::Vite => vec!["--port".into(), p, "--host".into()],
+            Framework::Astro => vec!["--port".into(), p, "--host".into(), "0.0.0.0".into()],
+            Framework::Angular => vec!["--port".into(), p, "--host".into(), "0.0.0.0".into()],
             Framework::SvelteKit => vec!["--port".into(), p, "--host".into()],
-            Framework::ReactRouter | Framework::Expo | Framework::Nuxt | Framework::Remix
-                                => vec!["--port".into(), p],
-            Framework::Unknown  => vec![],
+            Framework::ReactRouter | Framework::Expo | Framework::Nuxt | Framework::Remix => {
+                vec!["--port".into(), p]
+            }
+            Framework::Unknown => vec![],
         }
     }
 }
 
 fn detect_framework(cwd: &Path) -> Framework {
-    if cwd.join("angular.json").exists() { return Framework::Angular; }
+    if cwd.join("angular.json").exists() {
+        return Framework::Angular;
+    }
     if cwd.join("svelte.config.js").exists() || cwd.join("svelte.config.ts").exists() {
         return Framework::SvelteKit;
     }
@@ -80,16 +108,28 @@ fn detect_framework(cwd: &Path) -> Framework {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
             if let Some(scripts) = json.get("scripts").and_then(|v| v.as_object()) {
                 let scripts_str = serde_json::to_string(scripts).unwrap_or_default();
-                if scripts_str.contains("vite")         { return Framework::Vite; }
-                if scripts_str.contains("astro")        { return Framework::Astro; }
-                if scripts_str.contains("react-router") { return Framework::ReactRouter; }
-                if scripts_str.contains("nuxt")         { return Framework::Nuxt; }
-                if scripts_str.contains("remix")        { return Framework::Remix; }
+                if scripts_str.contains("vite") {
+                    return Framework::Vite;
+                }
+                if scripts_str.contains("astro") {
+                    return Framework::Astro;
+                }
+                if scripts_str.contains("react-router") {
+                    return Framework::ReactRouter;
+                }
+                if scripts_str.contains("nuxt") {
+                    return Framework::Nuxt;
+                }
+                if scripts_str.contains("remix") {
+                    return Framework::Remix;
+                }
             }
         }
     }
     if let Ok(s) = fs::read_to_string(cwd.join("app.json")) {
-        if s.contains("expo") { return Framework::Expo; }
+        if s.contains("expo") {
+            return Framework::Expo;
+        }
     }
     Framework::Unknown
 }
@@ -102,8 +142,12 @@ impl LanguageDriver for NodeDriver {
     fn detect(&self, cwd: &Path) -> bool {
         cwd.join("package.json").exists()
     }
-    fn priority(&self) -> u8 { 40 }
-    fn name(&self) -> &'static str { "Node.js" }
+    fn priority(&self) -> u8 {
+        40
+    }
+    fn name(&self) -> &'static str {
+        "Node.js"
+    }
     fn project_name(&self, cwd: &Path) -> Option<String> {
         crate::detect::read_json_field(cwd, "package.json", "name")
     }
@@ -127,13 +171,17 @@ impl LanguageDriver for NodeDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn node_driver_detects_package_json() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{"name":"app","scripts":{"dev":"vite"}}"#).unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"app","scripts":{"dev":"vite"}}"#,
+        )
+        .unwrap();
         assert!(NodeDriver.detect(tmp.path()));
     }
 
@@ -147,13 +195,20 @@ mod tests {
     fn node_driver_project_name_from_package_json() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("package.json"), r#"{"name":"my-app"}"#).unwrap();
-        assert_eq!(NodeDriver.project_name(tmp.path()), Some("my-app".to_string()));
+        assert_eq!(
+            NodeDriver.project_name(tmp.path()),
+            Some("my-app".to_string())
+        );
     }
 
     #[test]
     fn node_driver_start_command_picks_dev_script() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{"scripts":{"dev":"vite","build":"tsc"}}"#).unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"vite","build":"tsc"}}"#,
+        )
+        .unwrap();
         let cmd = NodeDriver.start_command(tmp.path()).unwrap();
         assert!(cmd.contains("dev"), "expected dev in '{cmd}'");
     }
@@ -161,7 +216,11 @@ mod tests {
     #[test]
     fn node_driver_vite_injection() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"vite"}}"#,
+        )
+        .unwrap();
         let inj = NodeDriver.port_injection(tmp.path(), 4123);
         match inj {
             crate::detect::PortInjection::CliArgs(args) => {
@@ -175,15 +234,26 @@ mod tests {
     #[test]
     fn node_driver_unknown_framework_env_only() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{"scripts":{"dev":"node server.js"}}"#).unwrap();
-        assert!(matches!(NodeDriver.port_injection(tmp.path(), 4123), crate::detect::PortInjection::EnvOnly));
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"node server.js"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            NodeDriver.port_injection(tmp.path(), 4123),
+            crate::detect::PortInjection::EnvOnly
+        ));
     }
 
     #[test]
     fn resolve_run_args_expands_script_name() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("pnpm-lock.yaml"), "").unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"vite"}}"#,
+        )
+        .unwrap();
         let result = resolve_run_args(tmp.path(), vec!["dev".to_string()]);
         assert_eq!(result, vec!["pnpm", "run", "dev"]);
     }

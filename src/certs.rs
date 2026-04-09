@@ -384,6 +384,9 @@ mod tests {
     #[test]
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn is_ca_trusted_always_false_on_unsupported_platform() {
-        assert!(!is_ca_trusted(), "unsupported platforms must always return false");
+        assert!(
+            !is_ca_trusted(),
+            "unsupported platforms must always return false"
+        );
     }
 }

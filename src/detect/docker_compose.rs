@@ -1,6 +1,6 @@
+use crate::detect::{LanguageDriver, PortInjection};
 use std::fs;
 use std::path::Path;
-use crate::detect::{LanguageDriver, PortInjection};
 
 pub struct DockerComposeDriver;
 
@@ -26,8 +26,8 @@ fn parse_host_port(val: &serde_yaml::Value) -> Option<u16> {
         let parts: Vec<&str> = s.split(':').collect();
         return match parts.len() {
             1 => parts[0].trim().parse().ok(),
-            2 => parts[0].trim().parse().ok(),   // "host:container"
-            3 => parts[1].trim().parse().ok(),   // "ip:host:container"
+            2 => parts[0].trim().parse().ok(), // "host:container"
+            3 => parts[1].trim().parse().ok(), // "ip:host:container"
             _ => None,
         };
     }
@@ -67,9 +67,13 @@ impl LanguageDriver for DockerComposeDriver {
         COMPOSE_FILES.iter().any(|name| cwd.join(name).is_file())
     }
 
-    fn priority(&self) -> u8 { 55 }
+    fn priority(&self) -> u8 {
+        55
+    }
 
-    fn name(&self) -> &'static str { "Docker Compose" }
+    fn name(&self) -> &'static str {
+        "Docker Compose"
+    }
 
     fn project_name(&self, cwd: &Path) -> Option<String> {
         // Prefer the top-level `name:` field in the compose file
@@ -190,12 +194,16 @@ mod tests {
     #[test]
     fn service_port_candidates_single_service() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("docker-compose.yml"), r#"
+        fs::write(
+            tmp.path().join("docker-compose.yml"),
+            r#"
 services:
   web:
     ports:
       - "3000:80"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let candidates = DockerComposeDriver.service_port_candidates(tmp.path());
         assert_eq!(candidates, vec![("web".to_string(), 3000u16)]);
     }
@@ -203,7 +211,9 @@ services:
     #[test]
     fn service_port_candidates_multiple_services() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("docker-compose.yml"), r#"
+        fs::write(
+            tmp.path().join("docker-compose.yml"),
+            r#"
 services:
   web:
     ports:
@@ -213,7 +223,9 @@ services:
       - "8080:8080"
   db:
     image: postgres
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let candidates = DockerComposeDriver.service_port_candidates(tmp.path());
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().any(|(n, p)| n == "web" && *p == 3000));
@@ -223,75 +235,116 @@ services:
     #[test]
     fn service_port_candidates_skips_services_without_ports() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("docker-compose.yml"), r#"
+        fs::write(
+            tmp.path().join("docker-compose.yml"),
+            r#"
 services:
   db:
     image: postgres
   redis:
     image: redis
-"#).unwrap();
-        assert!(DockerComposeDriver.service_port_candidates(tmp.path()).is_empty());
+"#,
+        )
+        .unwrap();
+        assert!(DockerComposeDriver
+            .service_port_candidates(tmp.path())
+            .is_empty());
     }
 
     #[test]
     fn service_port_candidates_parses_host_colon_container() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("compose.yml"), r#"
+        fs::write(
+            tmp.path().join("compose.yml"),
+            r#"
 services:
   web:
     ports:
       - "3000:80"
-"#).unwrap();
-        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            DockerComposeDriver.service_port_candidates(tmp.path())[0].1,
+            3000
+        );
     }
 
     #[test]
     fn service_port_candidates_parses_bare_port() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("compose.yml"), r#"
+        fs::write(
+            tmp.path().join("compose.yml"),
+            r#"
 services:
   web:
     ports:
       - "3000"
-"#).unwrap();
-        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            DockerComposeDriver.service_port_candidates(tmp.path())[0].1,
+            3000
+        );
     }
 
     #[test]
     fn service_port_candidates_parses_ip_host_container() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("compose.yml"), r#"
+        fs::write(
+            tmp.path().join("compose.yml"),
+            r#"
 services:
   web:
     ports:
       - "127.0.0.1:3000:80"
-"#).unwrap();
-        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            DockerComposeDriver.service_port_candidates(tmp.path())[0].1,
+            3000
+        );
     }
 
     #[test]
     fn service_port_candidates_parses_integer_port() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("compose.yml"), r#"
+        fs::write(
+            tmp.path().join("compose.yml"),
+            r#"
 services:
   web:
     ports:
       - 3000
-"#).unwrap();
-        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            DockerComposeDriver.service_port_candidates(tmp.path())[0].1,
+            3000
+        );
     }
 
     #[test]
     fn service_port_candidates_parses_long_syntax() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("compose.yml"), r#"
+        fs::write(
+            tmp.path().join("compose.yml"),
+            r#"
 services:
   web:
     ports:
       - published: 3000
         target: 80
-"#).unwrap();
-        assert_eq!(DockerComposeDriver.service_port_candidates(tmp.path())[0].1, 3000);
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            DockerComposeDriver.service_port_candidates(tmp.path())[0].1,
+            3000
+        );
     }
 
     // ── project_name ──────────────────────────────────────────────────────────
@@ -299,11 +352,18 @@ services:
     #[test]
     fn project_name_reads_compose_name_field() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("docker-compose.yml"), r#"
+        fs::write(
+            tmp.path().join("docker-compose.yml"),
+            r#"
 name: my-app
 services: {}
-"#).unwrap();
-        assert_eq!(DockerComposeDriver.project_name(tmp.path()), Some("my-app".to_string()));
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            DockerComposeDriver.project_name(tmp.path()),
+            Some("my-app".to_string())
+        );
     }
 
     #[test]
@@ -311,7 +371,10 @@ services: {}
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("docker-compose.yml"), "services: {}").unwrap();
         let name = DockerComposeDriver.project_name(tmp.path()).unwrap();
-        assert!(!name.is_empty(), "expected non-empty fallback name, got empty string");
+        assert!(
+            !name.is_empty(),
+            "expected non-empty fallback name, got empty string"
+        );
     }
 
     // ── priority ──────────────────────────────────────────────────────────────
