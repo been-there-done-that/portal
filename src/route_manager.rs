@@ -105,22 +105,31 @@ mod tests {
         assert!(mgr.get("app.localhost").is_some());
     }
 
+    /// Find a free port by binding to :0, returning the port, and keeping the
+    /// listener alive. Caller drops the listener right before using the port.
+    fn reserve_port() -> (std::net::TcpListener, u16) {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    }
+
     #[tokio::test]
     async fn insert_tcp_route_starts_listener() {
         let temp = TempDir::new().unwrap();
         let mgr = make_manager(&temp);
 
-        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let public_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
-
+        let (reserved, public_port) = reserve_port();
         let backend = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let backend_port = backend.local_addr().unwrap().port();
 
+        // Drop reservation immediately before insert to minimize race window
+        drop(reserved);
         mgr.insert(make_tcp_route("redis.localhost", backend_port, public_port))
             .await
             .unwrap();
 
+        // Give the spawned listener task a moment to bind
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let probe = std::net::TcpListener::bind(("127.0.0.1", public_port));
         assert!(probe.is_err(), "expected public port to be in use by TCP listener");
         assert!(mgr.get("redis.localhost").is_some());
@@ -131,12 +140,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = make_manager(&temp);
 
-        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let public_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
-
+        let (reserved, public_port) = reserve_port();
         let backend = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let backend_port = backend.local_addr().unwrap().port();
+        drop(reserved);
 
         mgr.insert(make_tcp_route("redis.localhost", backend_port, public_port))
             .await
@@ -155,14 +162,14 @@ mod tests {
         let tcp = TcpRouteManager::default();
         let mgr = RouteManager::new(store.clone(), tcp.clone());
 
-        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let public_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
+        let (reserved, public_port) = reserve_port();
 
         let mut route = make_tcp_route("redis.localhost", 9999, public_port);
         route.pid = u32::MAX;
         route.owner_pid = u32::MAX;
 
+        // Drop reservation right before insert to minimize race window
+        drop(reserved);
         // Insert directly into both stores (simulating daemon startup state)
         store.insert(route.clone()).await.unwrap();
         tcp.ensure_route(&route).await.unwrap();

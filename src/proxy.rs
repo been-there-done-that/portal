@@ -283,8 +283,13 @@ pub async fn handle_https_request(
         .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
         .collect();
 
+    // Collect request body with a 50 MB safety limit to prevent OOM
+    const MAX_BODY: usize = 50 * 1024 * 1024;
     let req_body_bytes = match body.collect().await {
-        Ok(c) => c.to_bytes(),
+        Ok(c) => {
+            let b = c.to_bytes();
+            if b.len() > MAX_BODY { b.slice(..MAX_BODY) } else { b }
+        }
         Err(_) => {
             return Ok(if accept_html {
                 Response::builder()
@@ -336,7 +341,10 @@ pub async fn handle_https_request(
                 .collect();
 
             let resp_bytes = match resp_body.collect().await {
-                Ok(c) => c.to_bytes(),
+                Ok(c) => {
+                    let b = c.to_bytes();
+                    if b.len() > MAX_BODY { b.slice(..MAX_BODY) } else { b }
+                }
                 Err(_) => bytes::Bytes::new(),
             };
 
