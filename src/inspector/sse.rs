@@ -22,6 +22,7 @@ pub fn to_meta(req: &CapturedRequest, id: i64) -> RequestMeta {
         status: req.res_status,
         duration_ms: req.duration_ms,
         timestamp: req.timestamp,
+        content_type: req.content_type.clone(),
     }
 }
 
@@ -45,6 +46,7 @@ mod tests {
             res_body: CapturedBody::Empty,
             duration_ms: 1,
             timestamp: 0,
+            content_type: None,
         };
         let meta = to_meta(&req, 7);
         tx.send(meta).unwrap();

@@ -481,6 +481,9 @@ pub async fn handle_https_request(
                             req_headers,
                             req_body: req_body_capture,
                             res_status,
+                            content_type: res_headers.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                                .map(|(_, v)| v.clone()),
                             res_headers,
                             res_body: res_handle.to_captured_body(),
                             duration_ms: start.elapsed().as_millis() as u64,
@@ -506,6 +509,9 @@ pub async fn handle_https_request(
                         req_headers,
                         req_body: CapturedBody::from_bytes(&req_body_bytes),
                         res_status,
+                        content_type: res_headers.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                            .map(|(_, v)| v.clone()),
                         res_headers: res_headers.clone(),
                         res_body: CapturedBody::from_bytes(&resp_bytes),
                         duration_ms: start.elapsed().as_millis() as u64,

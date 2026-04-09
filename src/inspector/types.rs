@@ -17,6 +17,7 @@ pub struct CapturedRequest {
     pub res_body: CapturedBody,
     pub duration_ms: u64,
     pub timestamp: i64, // Unix ms
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ pub struct RequestMeta {
     pub status: u16,
     pub duration_ms: u64,
     pub timestamp: i64,
+    pub content_type: Option<String>,
 }
 
 /// Full record returned by GET /api/requests (includes headers + bodies).
@@ -96,6 +98,7 @@ pub struct RequestRecord {
     pub res_body: String,
     pub res_truncated: bool,
     pub res_total_bytes: usize,
+    pub content_type: Option<String>,
 }
 
 #[cfg(test)]
@@ -112,6 +115,7 @@ mod tests {
             status: 200,
             duration_ms: 42,
             timestamp: 1712500321000,
+            content_type: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: RequestMeta = serde_json::from_str(&json).unwrap();
