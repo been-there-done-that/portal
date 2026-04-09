@@ -376,13 +376,12 @@ pub async fn handle_https_request(
         .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
         .collect();
 
-    // Collect request body with a 50 MB safety limit to prevent OOM
-    const MAX_BODY: usize = 50 * 1024 * 1024;
-    let req_body_bytes = match body.collect().await {
-        Ok(c) => {
-            let b = c.to_bytes();
-            if b.len() > MAX_BODY { b.slice(..MAX_BODY) } else { b }
-        }
+    // Collect request body — capped at 10MB (request bodies in dev are typically small)
+    let req_body_bytes = match http_body_util::Limited::new(body, 10 * 1024 * 1024)
+        .collect()
+        .await
+    {
+        Ok(c) => c.to_bytes(),
         Err(_) => {
             return Ok(if accept_html {
                 Response::builder()
@@ -433,31 +432,86 @@ pub async fn handle_https_request(
                 .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
                 .collect();
 
-            let resp_bytes = match resp_body.collect().await {
-                Ok(c) => {
-                    let b = c.to_bytes();
-                    if b.len() > MAX_BODY { b.slice(..MAX_BODY) } else { b }
+            // Decide: stream large responses via TeeBody, collect small ones
+            let content_length = resp_parts
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<usize>().ok());
+
+            let should_stream = content_length.map_or(true, |cl| cl > crate::inspector::types::BODY_CAP);
+
+            if should_stream {
+                // Stream response body — capture first 1MB for inspector asynchronously
+                let tee = TeeBody::new(resp_body);
+                let res_handle = tee.captured_handle();
+
+                // Box the TeeBody into our standard body type
+                let boxed_body: BoxBodyType = http_body_util::BodyExt::boxed(tee);
+
+                // Fire inspector capture in background after response streams
+                if let Some(sender) = inspector {
+                    let hostname = hostname.clone();
+                    let req_body_capture = crate::inspector::types::CapturedBody::from_bytes(&req_body_bytes);
+                    tokio::spawn(async move {
+                        // Wait for the response body to be consumed (up to 30s)
+                        let mut last_total = 0usize;
+                        let mut stable_count = 0u32;
+                        for _ in 0..300u32 {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            let (_, total) = res_handle.take();
+                            if let Some(cl) = content_length {
+                                if total >= cl { break; }
+                            }
+                            if total > 0 && total == last_total {
+                                stable_count += 1;
+                                if stable_count >= 5 { break; } // no progress for 500ms
+                            } else {
+                                stable_count = 0;
+                            }
+                            last_total = total;
+                        }
+                        sender.send(crate::inspector::types::CapturedRequest {
+                            hostname,
+                            method,
+                            path: path_and_query,
+                            req_headers,
+                            req_body: req_body_capture,
+                            res_status,
+                            res_headers,
+                            res_body: res_handle.to_captured_body(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        });
+                    });
                 }
-                Err(_) => bytes::Bytes::new(),
-            };
 
-            if let Some(sender) = &inspector {
-                use crate::inspector::types::{CapturedBody, CapturedRequest};
-                sender.send(CapturedRequest {
-                    hostname: hostname.clone(),
-                    method,
-                    path: path_and_query,
-                    req_headers,
-                    req_body: CapturedBody::from_bytes(&req_body_bytes),
-                    res_status,
-                    res_headers,
-                    res_body: CapturedBody::from_bytes(&resp_bytes),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                });
+                Ok(Response::from_parts(resp_parts, boxed_body))
+            } else {
+                // Small response — collect synchronously (existing pattern)
+                let resp_bytes = match resp_body.collect().await {
+                    Ok(c) => c.to_bytes(),
+                    Err(_) => bytes::Bytes::new(),
+                };
+
+                if let Some(sender) = &inspector {
+                    use crate::inspector::types::{CapturedBody, CapturedRequest};
+                    sender.send(CapturedRequest {
+                        hostname: hostname.clone(),
+                        method,
+                        path: path_and_query,
+                        req_headers,
+                        req_body: CapturedBody::from_bytes(&req_body_bytes),
+                        res_status,
+                        res_headers: res_headers.clone(),
+                        res_body: CapturedBody::from_bytes(&resp_bytes),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                    });
+                }
+
+                Ok(Response::from_parts(resp_parts, full_body(resp_bytes)))
             }
-
-            Ok(Response::from_parts(resp_parts, full_body(resp_bytes)))
         }
         Err(_) => Ok(if accept_html {
             Response::builder()
