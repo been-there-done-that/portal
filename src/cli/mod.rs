@@ -121,6 +121,42 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 crate::daemon::DaemonMode::Full
             };
+
+            // Check for port conflicts before starting (same picker as ensure_daemon_running)
+            if matches!(mode, crate::daemon::DaemonMode::Full) {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let config = crate::config::Config::load(&cwd).unwrap_or_default();
+                let ports_to_check = [config.proxy.http_port, config.proxy.https_port];
+                let conflicting = check_ports_free(&ports_to_check);
+                if !conflicting.is_empty() {
+                    let occupiers = discover_port_occupiers(&conflicting);
+                    if occupiers.is_empty() {
+                        eprintln!(
+                            "error: ports {:?} are already in use (cannot identify processes — try: sudo lsof -iTCP:{} -sTCP:LISTEN)",
+                            conflicting, conflicting[0]
+                        );
+                        std::process::exit(1);
+                    }
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
+                        match show_conflict_menu(&occupiers)? {
+                            ConflictAction::KillAndRetry(pids) => {
+                                kill_occupiers(&pids, &ports_to_check).await?;
+                            }
+                            ConflictAction::Cancel => {
+                                std::process::exit(0);
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "error: ports {:?} are already in use (no TTY for interactive picker)",
+                            conflicting
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             crate::daemon::start(mode).await?;
         }
 
