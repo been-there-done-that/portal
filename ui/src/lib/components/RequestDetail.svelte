@@ -33,7 +33,7 @@
 </script>
 
 <Sheet.Root open={sheetOpen} onOpenChange={handleOpenChange}>
-  <Sheet.Content side="right" class="w-[420px] sm:max-w-[420px] flex flex-col p-0 gap-0" showCloseButton={false}>
+  <Sheet.Content side="right" class="w-[600px] sm:max-w-[600px] flex flex-col p-0 gap-0" showCloseButton={false}>
     {#if !store.selectedRecord}
       <div class="flex flex-1 items-center justify-center font-mono text-xs text-muted-foreground">
         Loading...
