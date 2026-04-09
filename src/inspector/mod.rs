@@ -8,10 +8,11 @@ use std::path::PathBuf;
 
 use crate::inspector::{
     db::Db,
-    server::{router, AppState},
+    server::{router, set_start_time, AppState},
     sse::{new_channel, to_meta},
     types::CapturedRequest,
 };
+use crate::route_manager::RouteManager;
 
 /// Capacity of the mpsc channel between proxy and background worker.
 const CHANNEL_CAPACITY: usize = 8192;
@@ -35,7 +36,8 @@ pub struct Inspector {
 impl Inspector {
     /// Starts the background worker and axum server.
     /// Returns the Inspector (with its sender and bound port).
-    pub async fn start(db_path: PathBuf) -> crate::error::Result<Inspector> {
+    pub async fn start(db_path: PathBuf, routes: RouteManager) -> crate::error::Result<Inspector> {
+        set_start_time();
         let db = Db::open(db_path)?;
         let sse_tx = new_channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<CapturedRequest>(CHANNEL_CAPACITY);
@@ -58,7 +60,7 @@ impl Inspector {
         let port = crate::ports::find_free_port(3000, 9999)?;
 
         // Start axum server
-        let state = AppState { db, sse_tx };
+        let state = AppState { db, sse_tx, routes };
         let app = router(state);
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
             .await

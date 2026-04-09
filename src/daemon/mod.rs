@@ -195,7 +195,7 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
         let _ = cert_store.cert_for_host("_.localhost");
 
         let inspector =
-            match crate::inspector::Inspector::start(state_dir.join("inspector.db")).await {
+            match crate::inspector::Inspector::start(state_dir.join("inspector.db"), manager.clone()).await {
                 Ok(insp) => {
                     let _ = manager
                         .insert(crate::routes::Route {

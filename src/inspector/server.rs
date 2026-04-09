@@ -13,11 +13,19 @@ use std::convert::Infallible;
 use tokio_stream::StreamExt;
 
 use crate::inspector::{assets::serve_embedded, db::Db, sse::SseTx, types::RequestMeta};
+use crate::route_manager::RouteManager;
+
+static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn set_start_time() {
+    START_TIME.get_or_init(std::time::Instant::now);
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     pub sse_tx: SseTx,
+    pub routes: RouteManager,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -28,6 +36,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/requests/{id}", delete(delete_one_request))
         .route("/api/stream", get(sse_handler))
+        .route("/api/routes", get(get_routes))
+        .route(
+            "/api/routes/{hostname}/stop",
+            axum::routing::post(stop_route),
+        )
         .fallback(static_handler)
         .with_state(state)
 }
@@ -91,6 +104,83 @@ async fn sse_handler(
             Ok::<Event, Infallible>(Event::default().event("request").data(data))
         });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[derive(Serialize)]
+struct RoutesResponse {
+    routes: Vec<RouteResponse>,
+    daemon: DaemonResponse,
+}
+
+#[derive(Serialize)]
+struct RouteResponse {
+    hostname: String,
+    port: u16,
+    pid: u32,
+    protocol: String,
+    public_port: Option<u16>,
+    cwd: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct DaemonResponse {
+    version: String,
+    pid: u32,
+    uptime_secs: u64,
+}
+
+async fn get_routes(State(state): State<AppState>) -> impl IntoResponse {
+    let all_routes = state.routes.list();
+    let routes: Vec<RouteResponse> = all_routes
+        .into_iter()
+        .filter(|r| r.hostname != "_.localhost")
+        .map(|r| RouteResponse {
+            hostname: r.hostname,
+            port: r.port,
+            pid: r.pid,
+            protocol: format!("{:?}", r.protocol).to_lowercase(),
+            public_port: r.public_port,
+            cwd: r.cwd,
+            created_at: r.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    let uptime_secs = START_TIME
+        .get()
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
+
+    let daemon = DaemonResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        pid: std::process::id(),
+        uptime_secs,
+    };
+
+    Json(RoutesResponse { routes, daemon })
+}
+
+async fn stop_route(
+    State(state): State<AppState>,
+    Path(hostname): Path<String>,
+) -> impl IntoResponse {
+    let route = state.routes.get(&hostname);
+    match route {
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "route not found" })),
+        ),
+        Some(r) => {
+            #[cfg(unix)]
+            if r.pid != 0 {
+                unsafe {
+                    nix::libc::killpg(r.pid as nix::libc::pid_t, nix::libc::SIGTERM);
+                }
+            }
+            let _ = state.routes.remove(&hostname).await;
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+        }
+    }
 }
 
 async fn static_handler(uri: Uri) -> Response {
