@@ -149,6 +149,10 @@ impl StateStore {
 
 /// Check if a process with the given PID is alive.
 pub fn pid_alive_check(pid: u32) -> bool {
+    // pid=0 is the alias sentinel — aliases are never stale
+    if pid == 0 {
+        return true;
+    }
     #[cfg(unix)]
     {
         use nix::sys::signal::kill;
@@ -383,5 +387,44 @@ mod tests {
         let route = store.get("legacy.localhost").unwrap();
         assert_eq!(route.protocol, RouteProtocol::Http);
         assert_eq!(route.public_port, None);
+    }
+
+    #[test]
+    fn pid_alive_check_returns_true_for_zero_alias_sentinel() {
+        assert!(pid_alive_check(0), "pid 0 (alias sentinel) should always be considered alive");
+    }
+
+    #[tokio::test]
+    async fn alias_route_survives_remove_stale() {
+        let temp = TempDir::new().unwrap();
+        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
+
+        store.insert(Route {
+            hostname: "my-postgres.localhost".to_string(),
+            port: 5432,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: 0,
+            owner_pid: 0,
+            cwd: String::new(),
+            created_at: Utc::now(),
+        }).await.unwrap();
+
+        store.insert(Route {
+            hostname: "dead.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: u32::MAX,
+            owner_pid: u32::MAX,
+            cwd: "/tmp".to_string(),
+            created_at: Utc::now(),
+        }).await.unwrap();
+
+        let removed = store.remove_stale().await.unwrap();
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].hostname, "dead.localhost");
+        assert!(store.get("my-postgres.localhost").is_some(), "alias should survive stale cleanup");
     }
 }

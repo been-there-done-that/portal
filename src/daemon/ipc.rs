@@ -252,7 +252,7 @@ async fn dispatch(
                 None => Response::err(format!("no route for {hostname}")),
                 Some(route) => {
                     #[cfg(unix)]
-                    {
+                    if route.pid != 0 {
                         use nix::sys::signal::{killpg, Signal};
                         use nix::unistd::Pid;
                         killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
