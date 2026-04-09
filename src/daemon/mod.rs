@@ -5,7 +5,8 @@ use crate::certs::CertStore;
 use crate::config::{dirs_for_state, Config};
 use crate::error::Result;
 use crate::proxy::serve_http_redirect;
-use crate::routes::{Route, RouteProtocol, StateStore};
+use crate::route_manager::RouteManager;
+use crate::routes::{RouteProtocol, StateStore};
 use crate::tcp::TcpRouteManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,32 +159,30 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
     // Load config
     let config = Config::load(&std::env::current_dir().unwrap_or_default())?;
 
-    // Init route store
-    let routes = match StateStore::new(state_dir.join("routes.json")) {
+    // Init route store and manager
+    let store = match StateStore::new(state_dir.join("routes.json")) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("portal: failed to load route store: {e}");
             return Err(e);
         }
     };
+    let manager = RouteManager::new(store, TcpRouteManager::default());
 
-    let tcp_routes = TcpRouteManager::default();
+    // Clean up stale routes (automatically tears down TCP listeners)
+    let _ = manager.remove_stale().await;
 
-    let removed_stale = routes.remove_stale().await.unwrap_or_default();
-    for route in removed_stale {
-        if route.protocol == RouteProtocol::Tcp {
-            tcp_routes.remove(&route.hostname).await;
-        }
-    }
-    let restored_tcp_routes: Vec<Route> = routes
+    // Restore surviving TCP routes (re-inserting starts their listeners)
+    for route in manager
         .list()
-        .into_iter()
-        .filter(|route| route.protocol == RouteProtocol::Tcp)
-        .collect();
-    for route in restored_tcp_routes {
-        if let Err(e) = tcp_routes.ensure_route(&route).await {
+        .iter()
+        .filter(|r| r.protocol == RouteProtocol::Tcp)
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        if let Err(e) = manager.insert(route.clone()).await {
             tracing::warn!("failed to restore TCP route {}: {e}", route.hostname);
-            let _ = routes.remove(&route.hostname).await;
+            let _ = manager.remove(&route.hostname).await;
         }
     }
 
@@ -198,7 +197,7 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
         let inspector =
             match crate::inspector::Inspector::start(state_dir.join("inspector.db")).await {
                 Ok(insp) => {
-                    let _ = routes
+                    let _ = manager
                         .insert(crate::routes::Route {
                             hostname: "_.localhost".to_string(),
                             port: insp.port,
@@ -244,7 +243,7 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
 
         {
             let cs = cert_store.clone();
-            let rt = routes.clone();
+            let rt = manager.store.clone();
             tokio::spawn(serve_https(https_listener, cs, rt, inspector.clone()));
         }
     } else {
@@ -257,7 +256,6 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
 
     // Start IPC server (blocks)
     let sock_path = state_dir.join("portal.sock");
-    let manager = crate::route_manager::RouteManager::new(routes.clone(), tcp_routes);
     let ipc = ipc::IpcServer::new(
         sock_path,
         pid_path,
