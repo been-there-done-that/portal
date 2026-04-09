@@ -62,7 +62,12 @@ fn print_routes_table(resp: &Response) {
         let hostname_styled = style(hostname).dim().to_string();
         let protocol_styled = style(protocol).cyan().to_string();
         let port_styled = style(format!("{port}")).red().to_string();
-        let target_styled = style(target).bold().white().to_string();
+        let pid = route["pid"].as_u64().unwrap_or(1);
+        let target_styled = if pid == 0 {
+            format!("{}  {}", style(target).bold().white(), style("(alias)").dim())
+        } else {
+            style(target).bold().white().to_string()
+        };
         println!(
             "  {}  {}  {}  {}",
             pad_right(&hostname_styled, 30),
