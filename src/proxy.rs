@@ -18,6 +18,76 @@ pub fn is_tls_client_hello(first_byte: u8) -> bool {
     first_byte == 0x16
 }
 
+/// Check if a byte buffer starts with an HTTP/1.x method.
+/// Used after TLS termination to distinguish HTTP from raw TCP (Postgres, Redis, etc.).
+/// Requires at least 3 bytes; returns false for short buffers.
+pub fn is_http_method_prefix(buf: &[u8]) -> bool {
+    if buf.len() < 3 {
+        return false;
+    }
+    matches!(
+        &buf[..3],
+        b"GET" | b"PUT" | b"POS" | b"HEA" | b"DEL" | b"PAT" | b"OPT" | b"CON"
+    )
+}
+
+/// A wrapper that replays a prefix buffer before reading from the inner stream.
+/// Used to peek at TLS-decrypted bytes for protocol detection, then pass the
+/// full stream (prefix + rest) to hyper for HTTP handling.
+pub struct PrefixedIo<S> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: S,
+}
+
+impl<S> PrefixedIo<S> {
+    pub fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self { prefix, pos: 0, inner }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for PrefixedIo<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.pos < this.prefix.len() {
+            let remaining = &this.prefix[this.pos..];
+            let to_copy = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            this.pos += to_copy;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedIo<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 pub fn full_body(text: impl Into<Bytes>) -> BoxBodyType {
     Full::new(text.into())
         .map_err(|never| match never {})
@@ -438,6 +508,67 @@ where
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn http_method_prefix_detects_get() {
+        assert!(is_http_method_prefix(b"GET "));
+        assert!(is_http_method_prefix(b"GET /index.html HTTP/1.1"));
+    }
+
+    #[test]
+    fn http_method_prefix_detects_post() {
+        assert!(is_http_method_prefix(b"POST"));
+        assert!(is_http_method_prefix(b"POST /api HTTP/1.1"));
+    }
+
+    #[test]
+    fn http_method_prefix_detects_other_methods() {
+        assert!(is_http_method_prefix(b"PUT "));
+        assert!(is_http_method_prefix(b"HEAD"));
+        assert!(is_http_method_prefix(b"DELE"));
+        assert!(is_http_method_prefix(b"PATC"));
+        assert!(is_http_method_prefix(b"OPTI"));
+        assert!(is_http_method_prefix(b"CONN"));
+    }
+
+    #[test]
+    fn http_method_prefix_rejects_postgres() {
+        assert!(!is_http_method_prefix(&[0x00, 0x00, 0x00, 0x08]));
+    }
+
+    #[test]
+    fn http_method_prefix_rejects_redis() {
+        assert!(!is_http_method_prefix(b"*3\r\n"));
+    }
+
+    #[test]
+    fn http_method_prefix_rejects_mysql() {
+        assert!(!is_http_method_prefix(&[0x4a, 0x00, 0x00, 0x00]));
+    }
+
+    #[test]
+    fn http_method_prefix_rejects_empty() {
+        assert!(!is_http_method_prefix(b""));
+        assert!(!is_http_method_prefix(b"GE"));
+    }
+
+    #[test]
+    fn http_method_prefix_rejects_short_buffer() {
+        assert!(!is_http_method_prefix(b"G"));
+        assert!(!is_http_method_prefix(b"PO"));
+    }
+
+    #[tokio::test]
+    async fn prefixed_io_replays_prefix_then_inner() {
+        use tokio::io::AsyncReadExt;
+        let inner = std::io::Cursor::new(b"world".to_vec());
+        let mut reader = PrefixedIo::new(b"hello".to_vec(), inner);
+        let mut buf = vec![0u8; 10];
+        let n = reader.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        let n2 = reader.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n2], b"world");
+    }
 
     #[test]
     fn tls_byte_is_0x16() {
