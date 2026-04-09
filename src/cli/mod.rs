@@ -52,6 +52,20 @@ pub enum CliCommand {
     Status,
     /// Remove a route (without killing its process)
     Rm { hostname: String },
+    /// Register a static route for an already-running service
+    Alias {
+        /// App name (becomes <name>.localhost)
+        name: String,
+        /// Port the service is listening on
+        #[arg(required_unless_present = "remove")]
+        port: Option<u16>,
+        /// Overwrite an existing route
+        #[arg(long)]
+        force: bool,
+        /// Remove the alias instead of creating it
+        #[arg(long)]
+        remove: bool,
+    },
     /// Certificate management
     Cert {
         #[command(subcommand)]
@@ -205,6 +219,73 @@ pub async fn run(cli: Cli) -> Result<()> {
             write_frame(&mut stream, &Command::Rm { hostname }).await?;
             let resp = read_frame(&mut stream).await?;
             output::print_response(&resp);
+        }
+
+        CliCommand::Alias { name, port, force, remove } => {
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::Config::load(&cwd)?;
+            let mut setup = banner::SetupPrinter::quiet();
+            ensure_daemon_running(&config, &mut setup, DaemonRequirement::Any).await?;
+
+            let hostname = format!("{}.{}", crate::detect::sanitize_hostname(&name), config.proxy.tld);
+
+            if remove {
+                let mut stream = ipc_connect().await?;
+                write_frame(&mut stream, &Command::Rm { hostname: hostname.clone() }).await?;
+                let resp: crate::proto::Response = read_frame(&mut stream).await?;
+                if !resp.ok {
+                    let msg = resp.error.as_deref().unwrap_or("unknown error");
+                    eprintln!("{} {msg}", console::style("error:").red());
+                    std::process::exit(1);
+                }
+                println!("{} Removed alias: {}", console::style("✓").green(), hostname);
+                return Ok(());
+            }
+
+            let port = port.expect("port is required when not removing");
+
+            if !force {
+                let mut stream = ipc_connect().await?;
+                write_frame(&mut stream, &Command::Ls).await?;
+                let resp: crate::proto::Response = read_frame(&mut stream).await?;
+                if let Some(serde_json::Value::Array(routes)) = resp.data {
+                    if routes.iter().any(|r| r["hostname"].as_str() == Some(&hostname)) {
+                        eprintln!(
+                            "{} Route already exists for {}. Use --force to overwrite.",
+                            console::style("error:").red(),
+                            hostname
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            let mut stream = ipc_connect().await?;
+            write_frame(
+                &mut stream,
+                &Command::RegisterRoute {
+                    hostname: hostname.clone(),
+                    port,
+                    public_port: None,
+                    protocol: crate::routes::RouteProtocol::Http,
+                    pid: 0,
+                    cwd: String::new(),
+                },
+            ).await?;
+            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            if !resp.ok {
+                let msg = resp.error.as_deref().unwrap_or("unknown error");
+                eprintln!("{} {msg}", console::style("error:").red());
+                std::process::exit(1);
+            }
+
+            let url = build_public_url(&config, &hostname);
+            println!(
+                "{} {} → localhost:{}",
+                console::style("✓").green(),
+                console::style(&url).bold(),
+                port
+            );
         }
 
         CliCommand::Shutdown => {
