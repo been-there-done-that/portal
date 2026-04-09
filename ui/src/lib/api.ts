@@ -48,3 +48,36 @@ export async function deleteAllRequests(hostname?: string): Promise<void> {
 export async function deleteRequest(id: number): Promise<void> {
   await fetch(`/api/requests/${id}`, { method: 'DELETE' });
 }
+
+// ── Routes API ───────────────────────────────────────────────────────────────
+
+export interface RouteInfo {
+  hostname: string;
+  port: number;
+  pid: number;
+  protocol: 'http' | 'tcp';
+  public_port: number | null;
+  cwd: string;
+  created_at: string;
+}
+
+export interface DaemonInfo {
+  version: string;
+  pid: number;
+  uptime_secs: number;
+}
+
+export interface RoutesResponse {
+  routes: RouteInfo[];
+  daemon: DaemonInfo;
+}
+
+export async function fetchRoutes(): Promise<RoutesResponse> {
+  const res = await fetch('/api/routes');
+  return res.json();
+}
+
+export async function stopRoute(hostname: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/routes/${encodeURIComponent(hostname)}/stop`, { method: 'POST' });
+  return res.json();
+}
