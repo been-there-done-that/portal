@@ -1196,32 +1196,54 @@ fn parse_lsof_output(output: &str) -> Vec<PortOccupier> {
 }
 
 /// Use `lsof` to discover which processes hold the given ports.
+/// Falls back to `sudo lsof` when unprivileged lsof can't see root-owned processes.
 fn discover_port_occupiers(ports: &[u16]) -> Vec<PortOccupier> {
     let port_args: Vec<String> = ports.iter().map(|p| format!("TCP:{p}")).collect();
 
-    // Build: lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN -F pcn
-    let mut cmd = std::process::Command::new("lsof");
-    cmd.arg("-nP");
-    for a in &port_args {
-        cmd.arg(format!("-i{a}"));
-    }
-    cmd.args(["-sTCP:LISTEN", "-F", "pcn"]);
-
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
+    let run_lsof = |use_sudo: bool| -> Option<std::process::Output> {
+        let mut cmd = if use_sudo {
+            let mut c = std::process::Command::new("sudo");
+            c.arg("-n"); // non-interactive — fail silently if no cached credentials
+            c.arg("lsof");
+            c
+        } else {
+            std::process::Command::new("lsof")
+        };
+        cmd.arg("-nP");
+        for a in &port_args {
+            cmd.arg(format!("-i{a}"));
+        }
+        cmd.args(["-sTCP:LISTEN", "-F", "pcn"]);
+        cmd.output().ok()
     };
 
-    if output.stdout.is_empty() {
-        return Vec::new();
-    }
-
-    let text = match String::from_utf8(output.stdout) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    // Try unprivileged first
+    let output = match run_lsof(false) {
+        Some(o) => o,
+        None => return Vec::new(),
     };
 
-    parse_lsof_output(&text)
+    let result = if !output.stdout.is_empty() {
+        String::from_utf8(output.stdout).ok()
+            .map(|t| parse_lsof_output(&t))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // If unprivileged lsof found nothing, try sudo -n (non-interactive)
+    // to discover root-owned processes like a previous portal daemon.
+    if result.is_empty() {
+        if let Some(sudo_output) = run_lsof(true) {
+            if !sudo_output.stdout.is_empty() {
+                if let Ok(text) = String::from_utf8(sudo_output.stdout) {
+                    return parse_lsof_output(&text);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 enum ConflictAction {
