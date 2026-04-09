@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
-  import { store, selectRequest } from '$lib/stores/requests.svelte.js';
+  import { store, selectRequest, loadOlder } from '$lib/stores/requests.svelte.js';
 
   function methodColor(method: string): string {
     if (method === 'GET') return 'text-green-500';
@@ -18,49 +17,71 @@
     return 'text-green-500';
   }
 
-  function formatTime(ms: number): string {
-    const d = new Date(ms);
-    return d.toLocaleTimeString('en-US', { hour12: false });
+  function formatTimestamp(ms: number): string {
+    return new Date(ms).toISOString().replace('T', ' ').slice(0, 23);
+  }
+
+  function contentCategory(ct: string | null, status: number): string {
+    if (!ct) return '';
+    const c = ct.toLowerCase();
+    if (status === 101) return 'ws';
+    if (c.includes('json') || c.includes('xml') || c.includes('text/plain')) return 'xhr';
+    if (c.includes('javascript')) return 'js';
+    if (c.includes('text/css')) return 'css';
+    if (c.startsWith('image/')) return 'img';
+    if (c.includes('text/html')) return 'doc';
+    if (c.includes('font')) return 'font';
+    return 'other';
+  }
+
+  function handleScroll(e: Event) {
+    const el = e.target as HTMLElement;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 100) {
+      loadOlder();
+    }
   }
 </script>
 
 <div class="flex flex-1 min-h-0 flex-col bg-background overflow-hidden">
-  <ScrollArea class="flex-1" orientation="both">
-    <div class="min-w-max">
-      <!-- Column headers -->
-      <div
-        class="sticky top-0 z-10 grid border-b border-border bg-background px-2 py-1"
-        style="grid-template-columns: 70px 50px 45px 160px minmax(300px, 1fr) 60px 55px"
+  <div class="flex-1 min-h-0 overflow-y-auto" onscroll={handleScroll}>
+    {#each store.filtered as req (req.id)}
+      <button
+        class="group flex w-full items-start gap-2 border-l-3 px-4 py-1.5 text-left font-mono transition-colors hover:bg-accent/30
+               {store.selectedId === req.id ? 'border-blue-500 bg-accent/50' : 'border-transparent'}"
+        onclick={() => selectRequest(req.id)}
       >
-        {#each ['TIME', 'METHOD', 'STATUS', 'SERVICE', 'PATH', 'DURATION', 'SIZE'] as col}
-          <span class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground/50">{col}</span>
-        {/each}
-      </div>
-
-      {#each store.filtered as req (req.id)}
-        <button
-          class="grid w-full border-l-2 px-2 py-1.5 text-left transition-colors hover:bg-accent/30
-                 {store.selectedId === req.id
-                   ? 'border-blue-500 bg-accent/50'
-                   : 'border-transparent'}"
-          style="grid-template-columns: 70px 50px 45px 160px minmax(300px, 1fr) 60px 55px"
-          onclick={() => selectRequest(req.id)}
-        >
-          <span class="font-mono text-[10px] text-muted-foreground">{formatTime(req.timestamp)}</span>
-          <span class="font-mono text-[10px] font-medium {methodColor(req.method)}">{req.method}</span>
-          <span class="font-mono text-[10px] font-medium {statusColor(req.status)}">{req.status}</span>
-          <span class="truncate font-mono text-[10px] text-muted-foreground">{req.hostname}</span>
-          <span class="font-mono text-[10px] text-foreground">{req.path}</span>
-          <span class="font-mono text-[10px] text-muted-foreground">{req.duration_ms}ms</span>
-          <span class="font-mono text-[10px] text-muted-foreground">—</span>
-        </button>
-      {/each}
-
-      {#if store.filtered.length === 0}
-        <div class="px-4 py-8 text-center font-mono text-xs text-muted-foreground">
-          No requests yet
+        <span class="w-[130px] shrink-0 text-[10px] text-muted-foreground">{formatTimestamp(req.timestamp)}</span>
+        <span class="w-[50px] shrink-0 text-[10px] font-semibold {methodColor(req.method)}">{req.method}</span>
+        <span class="w-[35px] shrink-0 text-[10px] font-medium {statusColor(req.status)}">{req.status}</span>
+        <span class="w-[160px] shrink-0 truncate text-[10px] text-muted-foreground">{req.hostname}</span>
+        <div class="min-w-0 flex-1">
+          <div class="text-[11px] text-foreground break-all">
+            {#if req.path.includes('?')}
+              {req.path.split('?')[0]}<span class="text-muted-foreground/50">?{req.path.split('?').slice(1).join('?')}</span>
+            {:else}
+              {req.path}
+            {/if}
+          </div>
+          {#if req.content_type}
+            <div class="mt-0.5 flex gap-3 text-[9px] text-muted-foreground/60">
+              <span>{contentCategory(req.content_type, req.status)}</span>
+              <span>{req.content_type}</span>
+            </div>
+          {/if}
         </div>
-      {/if}
-    </div>
-  </ScrollArea>
+        <span class="w-[55px] shrink-0 text-right text-[10px] text-muted-foreground">{req.duration_ms}ms</span>
+        <span class="w-[55px] shrink-0 text-right text-[10px] text-muted-foreground">—</span>
+      </button>
+    {/each}
+
+    {#if store.filtered.length === 0}
+      <div class="px-4 py-8 text-center font-mono text-xs text-muted-foreground">
+        No requests yet
+      </div>
+    {/if}
+
+    {#if store.loadingOlder}
+      <div class="py-3 text-center text-[10px] text-muted-foreground">Loading older requests...</div>
+    {/if}
+  </div>
 </div>
