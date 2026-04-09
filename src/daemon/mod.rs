@@ -329,22 +329,75 @@ async fn serve_https(
                 return;
             }
 
-            let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+            let Ok(mut tls_stream) = acceptor.accept(tcp_stream).await else {
                 return;
             };
-            let io = TokioIo::new(tls_stream);
-            http1::Builder::new()
-                .serve_connection(
-                    io,
-                    hyper::service::service_fn(move |req| {
-                        let r = routes.clone();
-                        let insp = inspector.clone();
-                        async move { crate::proxy::handle_https_request(req, r, insp).await }
-                    }),
-                )
-                .with_upgrades()
-                .await
-                .ok();
+
+            // Read first bytes to detect HTTP vs raw TCP
+            let mut peek_buf = [0u8; 4];
+            let n = match tokio::io::AsyncReadExt::read(&mut tls_stream, &mut peek_buf).await {
+                Ok(0) => return,
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            let peeked = peek_buf[..n].to_vec();
+
+            if crate::proxy::is_http_method_prefix(&peeked) {
+                // HTTP path: replay peeked bytes + rest of stream → hyper
+                let prefixed = crate::proxy::PrefixedIo::new(peeked, tls_stream);
+                let io = hyper_util::rt::TokioIo::new(prefixed);
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        hyper::service::service_fn(move |req| {
+                            let r = routes.clone();
+                            let insp = inspector.clone();
+                            async move { crate::proxy::handle_https_request(req, r, insp).await }
+                        }),
+                    )
+                    .with_upgrades()
+                    .await
+                    .ok();
+            } else {
+                // TCP bridge: extract SNI hostname → look up route → bridge
+                let sni = tls_stream
+                    .get_ref()
+                    .1
+                    .server_name()
+                    .map(|s| s.to_string());
+
+                let hostname = match sni {
+                    Some(h) => h,
+                    None => {
+                        tracing::debug!("non-HTTP connection without SNI hostname, dropping");
+                        return;
+                    }
+                };
+
+                let route = match routes.get(&hostname) {
+                    Some(r) => r,
+                    None => {
+                        tracing::debug!("no route for TCP connection to {hostname}");
+                        return;
+                    }
+                };
+
+                let mut backend = match tokio::net::TcpStream::connect(("127.0.0.1", route.port)).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::debug!("TCP bridge: failed to connect to backend port {}: {e}", route.port);
+                        return;
+                    }
+                };
+
+                // Send the already-read bytes to the backend
+                if tokio::io::AsyncWriteExt::write_all(&mut backend, &peeked).await.is_err() {
+                    return;
+                }
+
+                // Bridge the rest bidirectionally
+                let _ = tokio::io::copy_bidirectional(&mut tls_stream, &mut backend).await;
+            }
         });
     }
 }
