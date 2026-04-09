@@ -57,7 +57,7 @@ impl Inspector {
         }
 
         // Find a free port for the axum server
-        let port = crate::ports::find_free_port(3000, 9999)?;
+        let port = crate::ports::find_free_port(10000, 19999)?;
 
         // Start axum server
         let state = AppState { db, sse_tx, routes };

@@ -92,12 +92,10 @@ pub async fn wait_for_port_free(port: u16, timeout: std::time::Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         // Port is truly free when we can bind to it (not just when connect fails).
-        // Bind 0.0.0.0 (wildcard) — macOS allows binding a specific address (127.0.0.1)
-        // even when 0.0.0.0 is already owned by another process, so 127.0.0.1 is not
-        // a reliable check. spawn_blocking keeps this blocking syscall off the async
-        // executor.
+        // Bind 127.0.0.1 to avoid briefly listening on all interfaces.
+        // spawn_blocking keeps this blocking syscall off the async executor.
         let free = tokio::task::spawn_blocking(move || {
-            std::net::TcpListener::bind(format!("0.0.0.0:{port}")).is_ok()
+            std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok()
         })
         .await
         .unwrap_or(false);
@@ -217,14 +215,13 @@ mod tests {
     #[tokio::test]
     async fn wait_for_port_free_waits_until_port_is_released() {
         // Bind a random port, then release it after 200ms — verify we wait for it.
-        // Use 0.0.0.0 so wait_for_port_free's wildcard bind check detects it correctly.
-        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         // Release the listener after 200ms from a background task
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            drop(listener);
+            drop(listener); // port released here
         });
 
         let start = std::time::Instant::now();
@@ -259,8 +256,7 @@ mod tests {
     async fn times_out_when_port_stays_bound() {
         use std::net::TcpListener;
         // Bind port 19996 to simulate a still-running process.
-        // Use 0.0.0.0 so wait_for_port_free's wildcard bind check detects it correctly.
-        let listener = TcpListener::bind("0.0.0.0:19996").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:19996").unwrap();
         let start = std::time::Instant::now();
         // Wait with a 350ms timeout
         wait_for_port_free(19996, std::time::Duration::from_millis(350)).await;

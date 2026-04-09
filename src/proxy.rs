@@ -457,7 +457,12 @@ where
             }
         }
     }
-    let response_head = String::from_utf8_lossy(&buf);
+    // Split header bytes from any post-header data that arrived in the same read
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")
+        .map(|pos| pos + 4)
+        .unwrap_or(buf.len());
+    let post_header_data = buf[header_end..].to_vec();
+    let response_head = String::from_utf8_lossy(&buf[..header_end]);
     if !response_head.starts_with("HTTP/1.1 101") {
         return Ok(Response::builder()
             .status(StatusCode::BAD_GATEWAY)
@@ -499,6 +504,12 @@ where
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let mut client_io = hyper_util::rt::TokioIo::new(upgraded);
+                // Forward any bytes that arrived after the \r\n\r\n delimiter
+                if !post_header_data.is_empty() {
+                    if client_io.write_all(&post_header_data).await.is_err() {
+                        return;
+                    }
+                }
                 let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await;
             }
             Err(e) => {

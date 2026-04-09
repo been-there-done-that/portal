@@ -121,7 +121,14 @@ impl StateStore {
         if let Some((uid, gid)) = crate::config::sudo_uid_gid() {
             unsafe {
                 let p = std::ffi::CString::new(self.path.to_string_lossy().as_bytes()).unwrap();
-                nix::libc::chown(p.as_ptr(), uid, gid);
+                let ret = nix::libc::chown(p.as_ptr(), uid, gid);
+                if ret != 0 {
+                    tracing::warn!(
+                        "chown failed for {}: {}",
+                        self.path.display(),
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
         Ok(())

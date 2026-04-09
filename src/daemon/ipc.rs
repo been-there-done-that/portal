@@ -70,7 +70,14 @@ impl IpcServer {
                 unsafe {
                     let path = std::ffi::CString::new(self.sock_path.to_string_lossy().as_bytes())
                         .unwrap();
-                    nix::libc::chown(path.as_ptr(), uid, gid);
+                    let ret = nix::libc::chown(path.as_ptr(), uid, gid);
+                    if ret != 0 {
+                        tracing::warn!(
+                            "chown failed for {}: {}",
+                            self.sock_path.display(),
+                            std::io::Error::last_os_error()
+                        );
+                    }
                 }
             }
         }
