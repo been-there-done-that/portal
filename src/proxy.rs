@@ -134,7 +134,11 @@ pub async fn serve_http_redirect(
                 .lines()
                 .find(|line| line.to_lowercase().starts_with("host:"))
                 .and_then(|line| line.splitn(2, ':').nth(1))
-                .map(|h| h.trim().to_string())
+                .map(|h| {
+                    // Strip port if present: "myapp.localhost:8443" → "myapp.localhost"
+                    let trimmed = h.trim();
+                    trimmed.split(':').next().unwrap_or(trimmed).to_string()
+                })
                 .unwrap_or_else(|| "localhost".to_string());
 
             let location = if https_port == 443 {
@@ -314,8 +318,10 @@ pub async fn handle_https_request(
         .headers
         .insert("x-forwarded-proto", "https".parse().unwrap());
 
-    let client: Client<HttpConnector, BoxBodyType> =
-        Client::builder(TokioExecutor::new()).build_http();
+    // Reuse a shared HTTP client for connection pooling and keep-alive
+    static HTTP_CLIENT: std::sync::OnceLock<Client<HttpConnector, BoxBodyType>> =
+        std::sync::OnceLock::new();
+    let client = HTTP_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http());
     let upstream_req = Request::from_parts(parts, full_body(req_body_bytes.clone()));
 
     match client.request(upstream_req).await {

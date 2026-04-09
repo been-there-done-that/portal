@@ -253,9 +253,7 @@ async fn dispatch(
                 Some(route) => {
                     #[cfg(unix)]
                     if route.pid != 0 {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::Pid;
-                        killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
+                        crate::process::safe_killpg_term(route.pid);
                     }
                     if let Err(e) = manager.remove(&hostname).await {
                         tracing::warn!("failed to remove route {hostname}: {e}");
@@ -319,6 +317,10 @@ async fn dispatch(
             pid,
             cwd,
         } => {
+            // Validate hostname: must be non-empty, no newlines, reasonable length
+            if hostname.is_empty() || hostname.len() > 253 || hostname.contains('\n') || hostname.contains('\r') {
+                return Response::err("invalid hostname");
+            }
             let route = crate::routes::Route {
                 hostname: hostname.clone(),
                 port,

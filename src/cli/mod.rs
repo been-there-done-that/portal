@@ -1384,8 +1384,12 @@ async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()>
         {
             use nix::sys::signal::{killpg, kill, Signal};
             use nix::unistd::Pid;
+            let raw = match i32::try_from(pid) {
+                Ok(v) if v > 0 => v,
+                _ => continue, // invalid PID — skip
+            };
             // Try killing the process group first
-            match killpg(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+            match killpg(Pid::from_raw(raw), Signal::SIGTERM) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EPERM) => {
                     // Root-owned — escalate via sudo kill on the process group
@@ -1399,7 +1403,7 @@ async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()>
                 }
                 Err(_) => {
                     // Process group kill failed — try single PID
-                    match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+                    match kill(Pid::from_raw(raw), Signal::SIGTERM) {
                         Ok(_) => {}
                         Err(nix::errno::Errno::EPERM) => {
                             let _ = tokio::process::Command::new("sudo")

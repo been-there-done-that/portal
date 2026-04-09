@@ -56,6 +56,19 @@ pub async fn spawn_child(
     Ok(cmd.spawn()?)
 }
 
+/// Safely send SIGTERM to a process group. Validates the PID to prevent
+/// broadcasting to all processes (which happens if pid wraps to -1 via `as i32`).
+#[cfg(unix)]
+pub fn safe_killpg_term(pid: u32) {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+    let raw = match i32::try_from(pid) {
+        Ok(v) if v > 0 => v,
+        _ => return, // invalid PID — don't signal
+    };
+    killpg(Pid::from_raw(raw), Signal::SIGTERM).ok();
+}
+
 /// Returns true when the command is `npm/yarn/pnpm/bun run <script>`.
 /// These package managers treat extra args as their own flags unless preceded by `--`.
 fn needs_double_dash_separator(args: &[String]) -> bool {
@@ -76,14 +89,9 @@ pub async fn stop_child(child: &mut tokio::process::Child) -> Result<()> {
         }
     };
 
-    // Send SIGTERM
+    // Send SIGTERM to process group
     #[cfg(unix)]
-    {
-        use nix::sys::signal::{killpg, Signal};
-        use nix::unistd::Pid;
-        // Kill the entire process group (handles uv run → uvicorn grandchild case)
-        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
-    }
+    safe_killpg_term(pid);
 
     #[cfg(windows)]
     {
