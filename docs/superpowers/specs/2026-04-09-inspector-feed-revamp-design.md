@@ -20,7 +20,7 @@ Replace the fixed 7-column CSS grid with a flex layout where content wraps natur
 - **Path**: wraps freely, query params in muted color
 - **Details row**: content type category (xhr/js/css/img/doc/font/ws/other), content-type header value
 - **Selected row**: blue left border (`border-l-3 border-blue-500`) + `bg-accent/50`
-- **`_.localhost` excluded**: filtered out in the store (not shown)
+- **`_.localhost` excluded**: skipped at the proxy layer (`proxy.rs`) — never captured, never stored, never sent via SSE
 
 ## Content-Type Filter
 
