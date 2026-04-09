@@ -1323,24 +1323,55 @@ fn show_conflict_menu(occupiers: &[PortOccupier]) -> crate::error::Result<Confli
 /// Kill each PID (trying direct kill first, falling back to `sudo kill` for
 /// root-owned processes), then poll up to 2 s for ports to be freed.
 async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()> {
+    // Try graceful portal shutdown first (via IPC) — this cleanly shuts down
+    // the daemon including its forked grandchild, hosts cleanup, and socket removal.
+    let sock = crate::config::dirs_for_state().join("portal.sock");
+    if sock.exists() {
+        if let Ok(mut stream) = tokio::net::UnixStream::connect(&sock).await {
+            let _ = crate::proto::write_frame(&mut stream, &crate::proto::Command::Shutdown).await;
+            // Give it a moment to shut down cleanly
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if check_ports_free(ports).is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    // Fallback: kill process groups (not just the PID) to catch forked children
     for &pid in pids {
         #[cfg(unix)]
         {
-            use nix::sys::signal::{kill, Signal};
+            use nix::sys::signal::{killpg, kill, Signal};
             use nix::unistd::Pid;
-            match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+            // Try killing the process group first
+            match killpg(Pid::from_raw(pid as i32), Signal::SIGTERM) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EPERM) => {
-                    // Root-owned process — escalate via sudo.
+                    // Root-owned — escalate via sudo kill on the process group
                     let _ = tokio::process::Command::new("sudo")
-                        .args(["kill", &pid.to_string()])
+                        .args(["kill", "--", &format!("-{pid}")])
                         .stdin(std::process::Stdio::inherit())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::inherit())
                         .status()
                         .await;
                 }
-                Err(_) => {}
+                Err(_) => {
+                    // Process group kill failed — try single PID
+                    match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+                        Ok(_) => {}
+                        Err(nix::errno::Errno::EPERM) => {
+                            let _ = tokio::process::Command::new("sudo")
+                                .args(["kill", &pid.to_string()])
+                                .stdin(std::process::Stdio::inherit())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::inherit())
+                                .status()
+                                .await;
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
         }
         #[cfg(not(unix))]
