@@ -4,5 +4,6 @@ pub mod error;
 pub mod hosts;
 pub mod ports;
 pub mod process;
+pub mod route_manager;
 pub mod routes;
 pub mod tcp;
