@@ -1,6 +1,5 @@
 <script lang="ts">
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Separator } from '$lib/components/ui/separator/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import {
     store,
@@ -14,6 +13,7 @@
   import { deleteAllRequests } from '$lib/api.js';
 
   const METHODS = ['ALL', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+  const CONTENT_TYPES = ['All', 'XHR', 'JS', 'CSS', 'Img', 'Doc', 'Font', 'WS', 'Other'];
 
   function toggleMethod(m: string) {
     if (m === 'ALL') {
@@ -30,73 +30,66 @@
     return store.filterMethods.has(m);
   }
 
+  function isContentActive(ct: string): boolean {
+    if (ct === 'All') return store.filterContentType === null;
+    return store.filterContentType === ct.toLowerCase();
+  }
+
   async function clearHistory() {
     await deleteAllRequests(store.filterHostname ?? undefined);
     await loadHistory();
   }
 </script>
 
-<div class="flex h-9 items-center gap-2 border-t border-border bg-card px-3 font-mono text-[10px]">
-  <!-- Label -->
-  <span class="shrink-0 uppercase tracking-widest text-muted-foreground">Filter</span>
-
-  <!-- Method pills -->
-  <div class="flex items-center gap-1">
-    {#each METHODS as method}
-      <button onclick={() => toggleMethod(method)}>
-        <Badge
-          variant={isMethodActive(method) ? 'default' : 'outline'}
-          class="cursor-pointer rounded px-2 py-0.5 text-[10px] leading-none"
-        >
-          {method}
-        </Badge>
-      </button>
-    {/each}
-  </div>
-
-  <!-- Separator -->
-  <div class="h-4 w-px shrink-0 bg-border"></div>
-
-  <!-- Error pill -->
-  <button onclick={() => setFilterErrors(!store.filterErrors)}>
-    <Badge
-      variant={store.filterErrors ? 'destructive' : 'outline'}
-      class="cursor-pointer rounded px-2 py-0.5 text-[10px] leading-none"
+<div class="flex h-8 items-center gap-1.5 border-b border-border bg-card/50 px-3 font-mono text-[9px]">
+  <!-- Method chips -->
+  {#each METHODS as method}
+    <button
+      class="rounded-sm px-1.5 py-[2px] text-[9px] font-medium transition-colors
+             {isMethodActive(method) ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground'}"
+      onclick={() => toggleMethod(method)}
     >
-      4xx/5xx
-    </Badge>
+      {method}
+    </button>
+  {/each}
+
+  <div class="h-3 w-px bg-border"></div>
+
+  <!-- Error chip -->
+  <button
+    class="rounded-sm px-1.5 py-[2px] text-[9px] font-medium transition-colors
+           {store.filterErrors ? 'bg-red-600 text-white' : 'text-muted-foreground hover:text-foreground'}"
+    onclick={() => setFilterErrors(!store.filterErrors)}
+  >
+    4xx/5xx
   </button>
 
-  <!-- Content-type chips -->
-  <div style="width: 1px; height: 14px;" class="bg-border"></div>
-  <div class="flex gap-1">
-    {#each ['All','XHR','JS','CSS','Img','Doc','Font','WS','Other'] as ct}
-      <button onclick={() => setFilterContentType(ct === 'All' ? null : ct.toLowerCase())}>
-        <Badge
-          variant={(ct === 'All' && store.filterContentType === null) || store.filterContentType === ct.toLowerCase() ? 'secondary' : 'outline'}
-          class="cursor-pointer rounded px-2 py-0.5 text-[9px] uppercase tracking-wide leading-none"
-        >
-          {ct}
-        </Badge>
-      </button>
-    {/each}
-  </div>
+  <div class="h-3 w-px bg-border"></div>
 
-  <!-- Search input — right-aligned -->
+  <!-- Content type chips -->
+  {#each CONTENT_TYPES as ct}
+    <button
+      class="rounded-sm px-1.5 py-[2px] text-[9px] transition-colors
+             {isContentActive(ct) ? 'bg-foreground text-background font-medium' : 'text-muted-foreground/50 hover:text-muted-foreground'}"
+      onclick={() => setFilterContentType(ct === 'All' ? null : ct.toLowerCase())}
+    >
+      {ct}
+    </button>
+  {/each}
+
+  <!-- Search -->
   <input
-    class="ml-auto h-7 w-80 rounded border border-border bg-transparent px-3 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-    placeholder="⌘F  Filter by path, hostname..."
+    class="ml-auto h-6 w-72 rounded-sm border border-border/50 bg-transparent px-2 font-mono text-[10px] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-foreground/30"
+    placeholder="Filter path, hostname..."
     oninput={(e) => setFilterSearch(e.currentTarget.value)}
     value={store.filterSearch}
   />
 
-  <!-- Clear history -->
-  <Button
-    variant="ghost"
-    size="sm"
-    class="h-6 shrink-0 px-2 text-[10px] text-destructive hover:text-destructive"
+  <!-- Clear -->
+  <button
+    class="shrink-0 text-[9px] text-muted-foreground/40 hover:text-red-500 transition-colors"
     onclick={clearHistory}
   >
-    Clear history
-  </Button>
+    clear
+  </button>
 </div>
