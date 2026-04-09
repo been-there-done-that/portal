@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
@@ -85,6 +86,98 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedIo<S> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// Handle to read the captured body prefix after the stream is consumed.
+#[derive(Clone)]
+pub struct CaptureHandle {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    total: std::sync::Arc<AtomicUsize>,
+    cap: usize,
+}
+
+impl CaptureHandle {
+    /// Take the captured prefix and total byte count.
+    pub fn take(&self) -> (Bytes, usize) {
+        let buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        (Bytes::from(buf.clone()), self.total.load(Ordering::Relaxed))
+    }
+
+    /// Build a CapturedBody from the capture.
+    pub fn to_captured_body(&self) -> crate::inspector::types::CapturedBody {
+        let (prefix, total) = self.take();
+        if prefix.is_empty() {
+            crate::inspector::types::CapturedBody::Empty
+        } else if total <= self.cap {
+            crate::inspector::types::CapturedBody::Full(prefix)
+        } else {
+            crate::inspector::types::CapturedBody::Truncated { prefix, total_bytes: total }
+        }
+    }
+}
+
+/// A body wrapper that forwards all frames to the consumer while capturing
+/// the first BODY_CAP bytes in a side buffer for the inspector.
+pub struct TeeBody<B> {
+    inner: B,
+    handle: CaptureHandle,
+}
+
+impl<B> TeeBody<B> {
+    pub fn new(inner: B) -> Self {
+        let cap = crate::inspector::types::BODY_CAP;
+        Self {
+            inner,
+            handle: CaptureHandle {
+                buf: std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(cap.min(65536)))),
+                total: std::sync::Arc::new(AtomicUsize::new(0)),
+                cap,
+            },
+        }
+    }
+
+    pub fn captured_handle(&self) -> CaptureHandle {
+        self.handle.clone()
+    }
+}
+
+impl<B> hyper::body::Body for TeeBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.handle.total.fetch_add(data.len(), Ordering::Relaxed);
+                    let mut buf = this.handle.buf.lock().unwrap_or_else(|e| e.into_inner());
+                    if buf.len() < this.handle.cap {
+                        let room = this.handle.cap - buf.len();
+                        let to_copy = data.len().min(room);
+                        buf.extend_from_slice(&data[..to_copy]);
+                    }
+                }
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
     }
 }
 
@@ -753,6 +846,63 @@ mod tests {
     #[test]
     fn extract_host_returns_empty_on_none() {
         assert_eq!(extract_host(None), "");
+    }
+
+    #[tokio::test]
+    async fn tee_body_captures_and_forwards_full_body() {
+        use http_body_util::BodyExt;
+        let data = bytes::Bytes::from(vec![b'x'; 500]);
+        let original = full_body(data.clone());
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let collected = tee.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 500);
+        let (prefix, total) = handle.take();
+        assert_eq!(prefix.len(), 500);
+        assert_eq!(total, 500);
+    }
+
+    #[tokio::test]
+    async fn tee_body_truncates_capture_at_body_cap() {
+        use http_body_util::BodyExt;
+        let size = crate::inspector::types::BODY_CAP + 1000;
+        let data = bytes::Bytes::from(vec![b'y'; size]);
+        let original = full_body(data);
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let collected = tee.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), size);
+        let (prefix, total) = handle.take();
+        assert_eq!(prefix.len(), crate::inspector::types::BODY_CAP);
+        assert_eq!(total, size);
+    }
+
+    #[tokio::test]
+    async fn tee_body_empty() {
+        use http_body_util::BodyExt;
+        let original = full_body("");
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let collected = tee.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 0);
+        let (prefix, total) = handle.take();
+        assert_eq!(prefix.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn tee_body_captured_body_truncated() {
+        use http_body_util::BodyExt;
+        let size = crate::inspector::types::BODY_CAP + 500;
+        let data = bytes::Bytes::from(vec![b'z'; size]);
+        let original = full_body(data);
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let _ = tee.collect().await.unwrap();
+        let captured = handle.to_captured_body();
+        assert!(captured.is_truncated());
+        assert_eq!(captured.total_bytes(), size);
+        assert_eq!(captured.prefix_bytes().len(), crate::inspector::types::BODY_CAP);
     }
 
     #[tokio::test]
