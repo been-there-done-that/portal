@@ -42,7 +42,11 @@ pub async fn spawn_child(
             cmd.args(&rest);
         }
         crate::detect::PortInjection::CliArgs(ref extra) => {
-            cmd.args(&rest).args(extra);
+            cmd.args(&rest);
+            if !extra.is_empty() && needs_double_dash_separator(&args) {
+                cmd.arg("--");
+            }
+            cmd.args(extra);
         }
         crate::detect::PortInjection::AppendAddress(ref addr) => {
             cmd.args(&rest).arg(addr);
@@ -50,6 +54,16 @@ pub async fn spawn_child(
     }
 
     Ok(cmd.spawn()?)
+}
+
+/// Returns true when the command is `npm/yarn/pnpm/bun run <script>`.
+/// These package managers treat extra args as their own flags unless preceded by `--`.
+fn needs_double_dash_separator(args: &[String]) -> bool {
+    if args.len() < 3 {
+        return false;
+    }
+    let runner = args[0].rsplit('/').next().unwrap_or(&args[0]);
+    matches!(runner, "npm" | "yarn" | "pnpm" | "bun") && args[1] == "run"
 }
 
 /// Gracefully stop a child process: SIGTERM, wait 5s, SIGKILL.
@@ -524,5 +538,41 @@ mod tests {
             );
             let _ = std::fs::remove_file(&test_file);
         }
+    }
+
+    #[test]
+    fn double_dash_needed_for_npm_run() {
+        let args = vec!["npm".into(), "run".into(), "start".into()];
+        assert!(needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn double_dash_needed_for_pnpm_run() {
+        let args = vec!["pnpm".into(), "run".into(), "dev".into()];
+        assert!(needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn double_dash_needed_for_yarn_run() {
+        let args = vec!["yarn".into(), "run".into(), "dev".into()];
+        assert!(needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn double_dash_not_needed_for_direct_node() {
+        let args = vec!["node".into(), "server.js".into()];
+        assert!(!needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn double_dash_not_needed_for_npx() {
+        let args = vec!["npx".into(), "vite".into()];
+        assert!(!needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn double_dash_not_needed_for_npm_without_run() {
+        let args = vec!["npm".into(), "start".into()];
+        assert!(!needs_double_dash_separator(&args));
     }
 }
