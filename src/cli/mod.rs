@@ -1327,48 +1327,58 @@ async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()>
     // the daemon including its forked grandchild, hosts cleanup, and socket removal.
     let state_dir = crate::config::dirs_for_state();
     let sock = state_dir.join("portal.sock");
+
+    // Strategy 1: IPC shutdown (clean — handles daemon + grandchild + hosts)
     if sock.exists() {
+        eprintln!("  {} sending shutdown to running daemon…", console::style("→").dim());
         if let Ok(mut stream) = tokio::net::UnixStream::connect(&sock).await {
             let _ = crate::proto::write_frame(&mut stream, &crate::proto::Command::Shutdown).await;
-            // Poll up to 3s for clean shutdown
-            for _ in 0..30u32 {
+            drop(stream);
+            // Poll up to 5s — daemon needs time to clean up hosts, remove socket, exit
+            for i in 0..50u32 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if check_ports_free(ports).is_empty() {
+                    eprintln!("  {} old daemon stopped", console::style("✓").green());
                     return Ok(());
                 }
+                if i == 20 {
+                    eprintln!("  {} waiting for daemon to release ports…", console::style("→").dim());
+                }
             }
+            eprintln!("  {} IPC shutdown sent but ports not yet free, trying kill…", console::style("!").yellow());
+        } else {
+            eprintln!("  {} socket exists but can't connect, trying kill…", console::style("!").yellow());
         }
     }
 
-    // Also try killing the PID from daemon.pid (the actual daemon grandchild,
-    // which may differ from the PID lsof found if the parent already exited).
+    // Strategy 2: sudo kill on the PID from daemon.pid
     let pid_path = state_dir.join("daemon.pid");
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(daemon_pid) = pid_str.trim().parse::<u32>() {
+            eprintln!("  {} killing daemon pid {daemon_pid}…", console::style("→").dim());
             #[cfg(unix)]
             {
-                // sudo kill — the daemon runs as root
                 let _ = tokio::process::Command::new("sudo")
-                    .args(["kill", &daemon_pid.to_string()])
+                    .args(["kill", "-9", &daemon_pid.to_string()])
                     .stdin(std::process::Stdio::inherit())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::inherit())
                     .status()
                     .await;
             }
-            // Poll briefly
             for _ in 0..20u32 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if check_ports_free(ports).is_empty() {
                     let _ = std::fs::remove_file(&pid_path);
                     let _ = std::fs::remove_file(&sock);
+                    eprintln!("  {} old daemon killed", console::style("✓").green());
                     return Ok(());
                 }
             }
         }
     }
 
-    // Fallback: kill process groups (not just the PID) to catch forked children
+    // Strategy 3: kill process groups from lsof PIDs
     for &pid in pids {
         #[cfg(unix)]
         {
