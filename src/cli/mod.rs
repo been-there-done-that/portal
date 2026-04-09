@@ -1203,7 +1203,6 @@ fn discover_port_occupiers(ports: &[u16]) -> Vec<PortOccupier> {
     let run_lsof = |use_sudo: bool| -> Option<std::process::Output> {
         let mut cmd = if use_sudo {
             let mut c = std::process::Command::new("sudo");
-            c.arg("-n"); // non-interactive — fail silently if no cached credentials
             c.arg("lsof");
             c
         } else {
@@ -1214,6 +1213,11 @@ fn discover_port_occupiers(ports: &[u16]) -> Vec<PortOccupier> {
             cmd.arg(format!("-i{a}"));
         }
         cmd.args(["-sTCP:LISTEN", "-F", "pcn"]);
+        if use_sudo {
+            // Inherit stdin/stderr so the sudo password prompt works
+            cmd.stdin(std::process::Stdio::inherit());
+            cmd.stderr(std::process::Stdio::inherit());
+        }
         cmd.output().ok()
     };
 
@@ -1231,7 +1235,7 @@ fn discover_port_occupiers(ports: &[u16]) -> Vec<PortOccupier> {
         Vec::new()
     };
 
-    // If unprivileged lsof found nothing, try sudo -n (non-interactive)
+    // If unprivileged lsof found nothing, try sudo lsof (will prompt for password)
     // to discover root-owned processes like a previous portal daemon.
     if result.is_empty() {
         if let Some(sudo_output) = run_lsof(true) {
