@@ -321,11 +321,37 @@ async fn serve_https(
         let routes = routes.clone();
         let inspector = inspector.clone();
         tokio::spawn(async move {
+            // Handle Postgres SSLRequest: if the first byte is 0x00, read the
+            // 8-byte SSLRequest message and respond with 'S' (yes, use SSL).
+            // Then the client sends a normal TLS ClientHello.
+            let mut tcp_stream = tcp_stream;
             let first = match crate::proxy::peek_first_byte(&tcp_stream).await {
                 Ok(b) => b,
                 Err(_) => return,
             };
-            if !crate::proxy::is_tls_client_hello(first) {
+            if first == 0x00 {
+                // Likely Postgres SSLRequest: 8 bytes = 4-byte length + 4-byte code (80877103)
+                let mut ssl_req = [0u8; 8];
+                if tokio::io::AsyncReadExt::read_exact(&mut tcp_stream, &mut ssl_req).await.is_err() {
+                    return;
+                }
+                let code = u32::from_be_bytes([ssl_req[4], ssl_req[5], ssl_req[6], ssl_req[7]]);
+                if code != 80877103 {
+                    return; // Not a Postgres SSLRequest
+                }
+                // Respond with 'S' (yes, use SSL)
+                if tokio::io::AsyncWriteExt::write_all(&mut tcp_stream, b"S").await.is_err() {
+                    return;
+                }
+                // Now the client will send a TLS ClientHello — re-peek
+                let first = match crate::proxy::peek_first_byte(&tcp_stream).await {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
+                if !crate::proxy::is_tls_client_hello(first) {
+                    return;
+                }
+            } else if !crate::proxy::is_tls_client_hello(first) {
                 return;
             }
 
