@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as Sheet from '$lib/components/ui/sheet/index.js';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
@@ -24,48 +25,41 @@
     return 'secondary';
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') clearSelected();
+  let sheetOpen = $derived(store.selectedId !== null);
+
+  function handleOpenChange(open: boolean) {
+    if (!open) clearSelected();
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-{#if store.selectedId !== null}
-  <div class="fixed right-0 top-0 bottom-0 z-50 flex w-[420px] flex-col bg-card border-l border-border shadow-2xl">
+<Sheet.Root open={sheetOpen} onOpenChange={handleOpenChange}>
+  <Sheet.Content side="right" class="w-[420px] sm:max-w-[420px] flex flex-col p-0 gap-0" showCloseButton={false}>
     {#if !store.selectedRecord}
       <div class="flex flex-1 items-center justify-center font-mono text-xs text-muted-foreground">
-        Loading…
+        Loading...
       </div>
     {:else}
       <!-- Header -->
-      <div class="border-b border-border px-4 py-3">
+      <Sheet.Header class="border-b border-border px-4 py-3 gap-1">
         <div class="flex items-center gap-2">
           <Badge variant="outline" class="font-mono text-[11px]">{store.selectedRecord.method}</Badge>
-          <span class="flex-1 truncate font-mono text-sm text-foreground">{store.selectedRecord.path}</span>
+          <Sheet.Title class="flex-1 truncate font-mono text-sm">
+            {store.selectedRecord.path}
+          </Sheet.Title>
           <Badge variant={statusVariant(store.selectedRecord.status)} class="font-mono text-[11px]">
             {store.selectedRecord.status}
           </Badge>
-          <button
-            class="ml-1 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors font-mono text-[11px]"
-            onclick={clearSelected}
-            aria-label="Close"
-          >✕</button>
         </div>
-        <p class="mt-1 font-mono text-[10px] text-muted-foreground">
+        <Sheet.Description class="font-mono text-[10px]">
           {store.selectedRecord.hostname} · {store.selectedRecord.duration_ms}ms
-        </p>
-      </div>
+        </Sheet.Description>
+      </Sheet.Header>
 
       <!-- Tabs -->
       <Tabs.Root value="request" class="flex flex-1 flex-col overflow-hidden">
-        <Tabs.List class="mx-4 mt-2 w-fit rounded-none border-b border-border bg-transparent p-0">
+        <Tabs.List variant="line" class="mx-4 mt-2 w-fit">
           {#each ['request', 'response', 'headers', 'timing'] as tab}
-            <Tabs.Trigger
-              value={tab}
-              class="rounded-none border-b-2 border-transparent px-3 py-1.5 font-mono text-[11px] capitalize
-                     data-[state=active]:border-primary data-[state=active]:text-foreground"
-            >
+            <Tabs.Trigger value={tab} class="font-mono text-[11px] capitalize">
               {tab}
             </Tabs.Trigger>
           {/each}
@@ -140,5 +134,5 @@
         </Tabs.Content>
       </Tabs.Root>
     {/if}
-  </div>
-{/if}
+  </Sheet.Content>
+</Sheet.Root>
