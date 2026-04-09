@@ -752,7 +752,7 @@ async fn ipc_connect() -> Result<tokio::net::UnixStream> {
 }
 
 fn build_public_url(config: &crate::config::Config, hostname: &str) -> String {
-    build_public_url_parts(
+    crate::config::public_url(
         config.proxy.https,
         hostname,
         config.proxy.http_port,
@@ -764,24 +764,6 @@ fn portal_ca_cert_path() -> std::path::PathBuf {
     crate::config::dirs_for_state().join("certs").join("ca.pem")
 }
 
-fn build_public_url_parts(
-    https_enabled: bool,
-    hostname: &str,
-    http_port: u16,
-    https_port: u16,
-) -> String {
-    if https_enabled {
-        if https_port == 443 {
-            format!("https://{hostname}")
-        } else {
-            format!("https://{hostname}:{https_port}")
-        }
-    } else if http_port == 80 {
-        format!("http://{hostname}")
-    } else {
-        format!("http://{hostname}:{http_port}")
-    }
-}
 
 fn parse_command_line(input: &str) -> Result<Vec<String>> {
     let mut args = Vec::new();
@@ -1613,7 +1595,7 @@ mod tests {
     #[test]
     fn build_public_url_includes_non_default_https_port() {
         assert_eq!(
-            build_public_url_parts(true, "myapp.localhost", 80, 4443),
+            crate::config::public_url(true, "myapp.localhost", 80, 4443),
             "https://myapp.localhost:4443"
         );
     }
@@ -1621,7 +1603,7 @@ mod tests {
     #[test]
     fn build_public_url_uses_http_when_https_disabled() {
         assert_eq!(
-            build_public_url_parts(false, "myapp.localhost", 8080, 4443),
+            crate::config::public_url(false, "myapp.localhost", 8080, 4443),
             "http://myapp.localhost:8080"
         );
     }

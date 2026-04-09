@@ -1,5 +1,5 @@
 use crate::error::Result;
-use rand::seq::SliceRandom;
+use rand::Rng;
 use std::net::TcpListener;
 
 pub const BLOCKED_PORTS: &[u16] = &[
@@ -35,48 +35,39 @@ pub fn validate_app_port(port: u16) -> Result<()> {
 /// Skips browser-blocked ports and ports < 1024.
 /// Returns Error::NoFreePort if no port is available.
 pub fn find_free_port(lo: u16, hi: u16) -> Result<u16> {
-    let mut ports: Vec<u16> = (lo..=hi).collect();
-
-    // Shuffle the ports for randomness
+    let range_size = (hi as usize).saturating_sub(lo as usize) + 1;
     let mut rng = rand::thread_rng();
-    ports.shuffle(&mut rng);
 
-    for port in ports {
-        // Skip browser-blocked ports
-        if is_browser_blocked(port) {
-            continue;
-        }
+    for _ in 0..range_size {
+        let port = rng.gen_range(lo..=hi);
 
-        // Skip privileged ports (< 1024)
-        if port < 1024 {
+        // Skip browser-blocked and privileged ports
+        if is_browser_blocked(port) || port < 1024 {
             continue;
         }
 
         // Try to bind to the port
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
-            // Successfully bound — port is free
-            drop(listener); // Close the listener immediately
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Ok(port);
         }
     }
 
-    // No free port found
+    // No free port found in the allotted probes
     Err(crate::error::Error::NoFreePort(lo, hi))
 }
 
 pub fn find_free_port_excluding(lo: u16, hi: u16, excluded: &[u16]) -> Result<u16> {
-    let mut ports: Vec<u16> = (lo..=hi).collect();
-
+    let range_size = (hi as usize).saturating_sub(lo as usize) + 1;
     let mut rng = rand::thread_rng();
-    ports.shuffle(&mut rng);
 
-    for port in ports {
+    for _ in 0..range_size {
+        let port = rng.gen_range(lo..=hi);
+
         if excluded.contains(&port) || is_browser_blocked(port) || port < 1024 {
             continue;
         }
 
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{port}")) {
-            drop(listener);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Ok(port);
         }
     }

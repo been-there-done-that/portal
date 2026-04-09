@@ -161,17 +161,7 @@ fn user_hostnames(manager: &RouteManager) -> Vec<String> {
 }
 
 fn public_url(https_enabled: bool, hostname: &str, http_port: u16, https_port: u16) -> String {
-    if https_enabled {
-        if https_port == 443 {
-            format!("https://{hostname}")
-        } else {
-            format!("https://{hostname}:{https_port}")
-        }
-    } else if http_port == 80 {
-        format!("http://{hostname}")
-    } else {
-        format!("http://{hostname}:{http_port}")
-    }
+    crate::config::public_url(https_enabled, hostname, http_port, https_port)
 }
 
 fn display_target_for_route(
