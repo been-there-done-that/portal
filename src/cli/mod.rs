@@ -1128,22 +1128,13 @@ fn check_ports_free(ports: &[u16]) -> Vec<u16> {
         .iter()
         .copied()
         .filter(|&p| {
-            // Use SO_REUSEADDR to match daemon behavior — TIME_WAIT ports
-            // are considered free (the daemon can bind them with reuseaddr).
-            use std::net::{SocketAddr, TcpListener};
-            let addr: SocketAddr = format!("0.0.0.0:{p}").parse().unwrap();
-            let sock = match socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None) {
-                Ok(s) => s,
-                Err(_) => return true, // can't create socket → assume in use
-            };
-            sock.set_reuse_address(true).ok();
-            if sock.bind(&addr.into()).is_err() {
-                return true; // genuinely in use by another process
-            }
-            if sock.listen(1).is_err() {
-                return true;
-            }
-            false // port is free (with reuseaddr)
+            // Check if we can connect to the port — if a server is listening, the port is occupied.
+            // This avoids SO_REUSEADDR/TIME_WAIT issues that plague bind-based probes.
+            std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{p}").parse().unwrap(),
+                std::time::Duration::from_millis(100),
+            )
+            .is_ok()
         })
         .collect()
 }
