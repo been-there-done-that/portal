@@ -3,14 +3,13 @@ use std::path::PathBuf;
 use crate::config::dirs_for_state;
 use crate::daemon::DaemonMode;
 use crate::proto::{read_frame, write_frame, Command, Response};
-use crate::routes::{Route, RouteProtocol, StateStore};
-use crate::tcp::TcpRouteManager;
+use crate::route_manager::RouteManager;
+use crate::routes::{Route, RouteProtocol};
 
 pub struct IpcServer {
     sock_path: PathBuf,
     pid_path: PathBuf,
-    routes: StateStore,
-    tcp_routes: TcpRouteManager,
+    manager: RouteManager,
     start_time: std::time::Instant,
     mode: DaemonMode,
     https_enabled: bool,
@@ -22,8 +21,7 @@ impl IpcServer {
     pub fn new(
         sock_path: PathBuf,
         pid_path: PathBuf,
-        routes: StateStore,
-        tcp_routes: TcpRouteManager,
+        manager: RouteManager,
         mode: DaemonMode,
         https_enabled: bool,
         http_port: u16,
@@ -34,8 +32,7 @@ impl IpcServer {
         IpcServer {
             sock_path,
             pid_path,
-            routes,
-            tcp_routes,
+            manager,
             start_time: std::time::Instant::now(),
             mode,
             https_enabled,
@@ -78,8 +75,7 @@ impl IpcServer {
             }
         }
 
-        let routes = self.routes.clone();
-        let tcp_routes = self.tcp_routes.clone();
+        let manager = self.manager.clone();
         let start_time = self.start_time;
         let mode = self.mode;
         let sock_path = self.sock_path.clone();
@@ -91,15 +87,13 @@ impl IpcServer {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let routes = routes.clone();
-                    let tcp_routes = tcp_routes.clone();
+                    let manager = manager.clone();
                     let sock = sock_path.clone();
                     let pid = pid_path.clone();
                     tokio::spawn(async move {
                         handle_connection(
                             stream,
-                            routes,
-                            tcp_routes,
+                            manager,
                             start_time,
                             mode,
                             sock,
@@ -121,8 +115,7 @@ impl IpcServer {
 
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
-    routes: StateStore,
-    tcp_routes: TcpRouteManager,
+    manager: RouteManager,
     start_time: std::time::Instant,
     mode: DaemonMode,
     sock_path: PathBuf,
@@ -138,8 +131,7 @@ async fn handle_connection(
 
     let response = dispatch(
         cmd,
-        routes,
-        tcp_routes,
+        manager,
         start_time,
         mode,
         sock_path,
@@ -154,10 +146,8 @@ async fn handle_connection(
 }
 
 /// Collect hostnames of all user-registered routes (excludes internal `_.localhost`).
-fn user_hostnames(routes: &StateStore) -> Vec<String> {
-    routes
-        .list()
-        .into_iter()
+fn user_hostnames(manager: &RouteManager) -> Vec<String> {
+    manager.list().into_iter()
         .filter(|r| r.hostname != "_.localhost" && r.protocol == RouteProtocol::Http)
         .map(|r| r.hostname)
         .collect()
@@ -212,8 +202,7 @@ fn route_response_value(
 
 async fn dispatch(
     cmd: Command,
-    routes: StateStore,
-    tcp_routes: TcpRouteManager,
+    manager: RouteManager,
     start_time: std::time::Instant,
     mode: DaemonMode,
     sock_path: PathBuf,
@@ -224,13 +213,8 @@ async fn dispatch(
 ) -> Response {
     match cmd {
         Command::Ls => {
-            let removed = routes.remove_stale().await.unwrap_or_default();
-            for route in removed {
-                if route.protocol == RouteProtocol::Tcp {
-                    tcp_routes.remove(&route.hostname).await;
-                }
-            }
-            let list: Vec<_> = routes
+            manager.remove_stale().await;
+            let list: Vec<_> = manager
                 .list()
                 .into_iter()
                 .filter(|r| r.hostname != "_.localhost")
@@ -241,7 +225,7 @@ async fn dispatch(
 
         Command::Status => {
             let uptime_secs = start_time.elapsed().as_secs();
-            let routes_count = routes
+            let routes_count = manager
                 .list()
                 .iter()
                 .filter(|r| r.hostname != "_.localhost")
@@ -262,7 +246,7 @@ async fn dispatch(
             if hostname.is_empty() {
                 return Response::err("hostname required for stop");
             }
-            match routes.get(&hostname) {
+            match manager.get(&hostname) {
                 None => Response::err(format!("no route for {hostname}")),
                 Some(route) => {
                     #[cfg(unix)]
@@ -271,25 +255,23 @@ async fn dispatch(
                         use nix::unistd::Pid;
                         killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
                     }
-                    tcp_routes.remove(&hostname).await;
-                    let _ = routes.remove(&hostname).await;
+                    manager.remove(&hostname).await;
                     Response::ok_empty()
                 }
             }
         }
 
         Command::Rm { hostname } => {
-            tcp_routes.remove(&hostname).await;
-            let _ = routes.remove(&hostname).await;
+            manager.remove(&hostname).await;
             Response::ok_empty()
         }
 
         Command::Shutdown => {
-            let shutdown_tcp_routes = tcp_routes.clone();
+            let shutdown_manager = manager.clone();
             let sock = sock_path.clone();
             let pid = pid_path.clone();
             tokio::spawn(async move {
-                shutdown_tcp_routes.shutdown_all().await;
+                shutdown_manager.shutdown_all_tcp().await;
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if let Err(e) = crate::hosts::clean_hosts_file() {
                     tracing::warn!("hosts cleanup on shutdown failed: {e}");
@@ -341,21 +323,15 @@ async fn dispatch(
                 cwd,
                 created_at: chrono::Utc::now(),
             };
-            if let Err(e) = tcp_routes.ensure_route(&route).await {
-                return Response::err(e.to_string());
-            }
-            match routes.insert(route.clone()).await {
+            match manager.insert(route).await {
                 Ok(_) => Response::ok_empty(),
-                Err(e) => {
-                    tcp_routes.remove(&route.hostname).await;
-                    Response::err(e.to_string())
-                }
+                Err(e) => Response::err(e.to_string()),
             }
         }
 
         // Note: explicit user command — bypasses PORTAL_SYNC_HOSTS opt-out intentionally.
         Command::HostsSync => {
-            let hostnames = user_hostnames(&routes);
+            let hostnames = user_hostnames(&manager);
             let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
             match crate::hosts::sync_hosts_file(&refs) {
                 Ok(_) => {
@@ -383,12 +359,16 @@ mod stale_tests {
     use super::*;
     use chrono::Utc;
     use tempfile::TempDir;
+    use crate::routes::StateStore;
+    use crate::tcp::TcpRouteManager;
+    use crate::route_manager::RouteManager;
 
     #[tokio::test]
     async fn ls_removes_stale_tcp_routes_and_releases_public_port() {
         let temp = TempDir::new().unwrap();
         let routes = StateStore::new(temp.path().join("routes.json")).unwrap();
         let tcp_routes = TcpRouteManager::default();
+        let manager = RouteManager::new(routes.clone(), tcp_routes.clone());
 
         let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let public_port = reserved.local_addr().unwrap().port();
@@ -409,8 +389,7 @@ mod stale_tests {
 
         let response = dispatch(
             Command::Ls,
-            routes.clone(),
-            tcp_routes.clone(),
+            manager,
             std::time::Instant::now(),
             DaemonMode::TcpOnly,
             temp.path().join("portal.sock"),
@@ -433,6 +412,9 @@ mod stale_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::StateStore;
+    use crate::tcp::TcpRouteManager;
+    use crate::route_manager::RouteManager;
 
     #[test]
     fn ls_hides_inspector_route() {
@@ -449,7 +431,9 @@ mod tests {
     #[tokio::test]
     async fn user_hostnames_excludes_inspector() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::routes::StateStore::new(dir.path().join("routes.json")).unwrap();
+        let store = StateStore::new(dir.path().join("routes.json")).unwrap();
+        let tcp_routes = TcpRouteManager::default();
+        let manager = RouteManager::new(store.clone(), tcp_routes);
 
         // Insert a real user route
         store
@@ -481,7 +465,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = user_hostnames(&store);
+        let result = user_hostnames(&manager);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "myapp.localhost");
         assert!(!result.contains(&"_.localhost".to_string()));

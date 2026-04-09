@@ -257,11 +257,11 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
 
     // Start IPC server (blocks)
     let sock_path = state_dir.join("portal.sock");
+    let manager = crate::route_manager::RouteManager::new(routes.clone(), tcp_routes);
     let ipc = ipc::IpcServer::new(
         sock_path,
         pid_path,
-        routes.clone(),
-        tcp_routes,
+        manager,
         mode,
         config.proxy.https,
         config.proxy.http_port,
