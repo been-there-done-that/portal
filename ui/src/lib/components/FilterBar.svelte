@@ -5,8 +5,11 @@
   import {
     store,
     loadHistory,
+    setFilterHostname,
     setFilterMethods,
     setFilterErrors,
+    setFilterContentType,
+    setFilterSearch,
   } from '$lib/stores/requests.svelte.js';
   import { deleteAllRequests } from '$lib/api.js';
 
@@ -64,11 +67,27 @@
     </Badge>
   </button>
 
+  <!-- Content-type chips -->
+  <div style="width: 1px; height: 14px;" class="bg-border"></div>
+  <div class="flex gap-1">
+    {#each ['All','XHR','JS','CSS','Img','Doc','Font','WS','Other'] as ct}
+      <button onclick={() => setFilterContentType(ct === 'All' ? null : ct.toLowerCase())}>
+        <Badge
+          variant={(ct === 'All' && store.filterContentType === null) || store.filterContentType === ct.toLowerCase() ? 'secondary' : 'outline'}
+          class="cursor-pointer rounded px-2 py-0.5 text-[9px] uppercase tracking-wide leading-none"
+        >
+          {ct}
+        </Badge>
+      </button>
+    {/each}
+  </div>
+
   <!-- Search input — right-aligned -->
   <input
-    type="text"
-    placeholder="/ search path..."
-    class="ml-auto h-6 w-48 rounded border border-border bg-transparent px-2 text-[10px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+    class="ml-auto h-7 w-80 rounded border border-border bg-transparent px-3 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+    placeholder="⌘F  Filter by path, hostname..."
+    oninput={(e) => setFilterSearch(e.currentTarget.value)}
+    value={store.filterSearch}
   />
 
   <!-- Clear history -->
