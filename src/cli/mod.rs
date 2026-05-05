@@ -57,6 +57,8 @@ pub enum CliCommand {
         /// App name (becomes <name>.<tld>) or full hostname
         name: String,
     },
+    /// Find and kill orphaned dev servers left by crashed CLI sessions
+    Prune,
     /// Register a static route for an already-running service
     Alias {
         /// App name (becomes <name>.localhost)
@@ -276,6 +278,29 @@ pub async fn run(cli: Cli) -> Result<()> {
             if resp.ok {
                 if let Some(url) = resp.data.as_ref().and_then(|d| d.get("url")).and_then(|u| u.as_str()) {
                     println!("{url}");
+                }
+            } else {
+                eprintln!("error: {}", resp.error.unwrap_or_default());
+                std::process::exit(1);
+            }
+        }
+
+        CliCommand::Prune => {
+            let mut stream = ipc_connect().await?;
+            write_frame(&mut stream, &Command::Prune).await?;
+            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            if resp.ok {
+                let pruned = resp.data
+                    .as_ref()
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if pruned.is_empty() {
+                    println!("nothing to prune");
+                } else {
+                    for h in &pruned {
+                        println!("pruned {h}");
+                    }
                 }
             } else {
                 eprintln!("error: {}", resp.error.unwrap_or_default());
