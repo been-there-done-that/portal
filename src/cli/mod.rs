@@ -666,7 +666,7 @@ async fn do_run(
     let port_env_name = config.project.port_env.as_deref().unwrap_or("PORT");
     let mut extra_env: Vec<(String, String)> = vec![(port_env_name.to_string(), port.to_string())];
     if !tcp {
-        extra_env.push(("PORTAL_URL".to_string(), public_url.clone()));
+        extra_env.push((crate::process::PORTLESS_URL_ENV.to_string(), public_url.clone()));
         // Inject NODE_EXTRA_CA_CERTS so Node.js child processes trust our local CA
         if config.proxy.https {
             let ca_path = portal_ca_cert_path();

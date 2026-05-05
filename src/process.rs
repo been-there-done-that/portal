@@ -1,6 +1,8 @@
 use crate::error::Result;
 use std::path::Path;
 
+pub const PORTLESS_URL_ENV: &str = "PORTLESS_URL";
+
 /// Spawn a child dev server process.
 /// Callers provide `extra_env` — all env vars to set (PORT, PORTAL_URL, NODE_EXTRA_CA_CERTS, etc.).
 /// Handles PortInjection variants for framework-specific port passing.
@@ -271,11 +273,11 @@ mod tests {
             let args = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("echo $PORTAL_URL > {}", test_file),
+                format!("echo $PORTLESS_URL > {}", test_file),
             ];
 
             let extra_env = vec![(
-                "PORTAL_URL".to_string(),
+                PORTLESS_URL_ENV.to_string(),
                 "https://myapp.localhost".to_string(),
             )];
             let mut child = spawn_child(
@@ -306,11 +308,11 @@ mod tests {
             let args = vec![
                 "cmd".to_string(),
                 "/C".to_string(),
-                format!("echo %PORTAL_URL% > {}", test_file),
+                format!("echo %PORTLESS_URL% > {}", test_file),
             ];
 
             let extra_env = vec![(
-                "PORTAL_URL".to_string(),
+                PORTLESS_URL_ENV.to_string(),
                 "https://myapp.localhost".to_string(),
             )];
             let mut child = spawn_child(
@@ -582,5 +584,11 @@ mod tests {
     fn double_dash_not_needed_for_npm_without_run() {
         let args = vec!["npm".into(), "start".into()];
         assert!(!needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn portless_url_env_var_name_is_correct() {
+        // Ensures the exported env var name matches the JS reference implementation
+        assert_eq!(crate::process::PORTLESS_URL_ENV, "PORTLESS_URL");
     }
 }
