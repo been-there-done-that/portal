@@ -14,6 +14,7 @@ mod proxy;
 mod route_manager;
 mod routes;
 mod tcp;
+mod workspace;
 
 use clap::Parser;
 use error::Result;

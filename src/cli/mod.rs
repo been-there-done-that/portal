@@ -179,6 +179,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Start { quiet } => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
+
+            // Try monorepo: look for workspace root, discover packages
+            if let Some(root) = crate::workspace::find_workspace_root(&cwd) {
+                let packages = crate::workspace::discover_workspace_packages(&root, &config);
+                if packages.len() > 1 {
+                    return run_monorepo(packages, &root, config, quiet).await;
+                }
+            }
+
             let registry = crate::detect::DriverRegistry::new(&config);
 
             let driver = match registry.detect(&cwd) {
@@ -609,6 +618,122 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Monorepo orchestration: start all workspace packages concurrently.
+async fn run_monorepo(
+    packages: Vec<crate::workspace::WorkspacePackage>,
+    root: &std::path::Path,
+    config: crate::config::Config,
+    quiet: bool,
+) -> Result<()> {
+    let mut setup = if quiet {
+        banner::SetupPrinter::quiet()
+    } else {
+        banner::SetupPrinter::new()
+    };
+    ensure_daemon_running(&config, &mut setup, DaemonRequirement::Full).await?;
+    ensure_cert_trusted(&mut setup).await?;
+    setup.done();
+
+    let has_turbo = crate::workspace::has_turbo_config(root);
+
+    let mut handles = Vec::new();
+
+    for pkg in packages {
+        let _pkg_config = crate::config::Config::load(&pkg.dir).unwrap_or_else(|_| config.clone());
+        let hostname = crate::detect::resolve_hostname(
+            &pkg.dir,
+            None,
+            &config.proxy.tld,
+        );
+        let public_url = build_public_url(&config, &hostname);
+
+        let args = if has_turbo {
+            let pkg_name = pkg.name.clone();
+            vec![
+                "turbo".to_string(),
+                "run".to_string(),
+                "dev".to_string(),
+                format!("--filter={pkg_name}"),
+            ]
+        } else {
+            pkg.command.clone()
+        };
+
+        let port = crate::ports::find_free_port(
+            config.proxy.port_range.0,
+            config.proxy.port_range.1,
+        )?;
+
+        let ca_path = portal_ca_cert_path();
+        let mut extra_env = vec![
+            ("PORT".to_string(), port.to_string()),
+            (crate::process::PORTLESS_URL_ENV.to_string(), public_url.clone()),
+        ];
+        if config.proxy.https && ca_path.exists() {
+            extra_env.push((
+                "NODE_EXTRA_CA_CERTS".to_string(),
+                ca_path.to_string_lossy().into_owned(),
+            ));
+        }
+
+        let label = pkg.name.clone();
+        let hostname_clone = hostname.clone();
+        let cwd = pkg.dir.clone();
+        let injection = pkg.injection.clone();
+        let config_clone = config.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut child = match crate::process::spawn_child(
+                &cwd,
+                &args,
+                port,
+                injection,
+                &extra_env,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[{label}] failed to start: {e}");
+                    return;
+                }
+            };
+
+            let child_pid = child.id().unwrap_or(std::process::id());
+            if let Ok(mut stream) = ipc_connect().await {
+                let _ = write_frame(
+                    &mut stream,
+                    &Command::RegisterRoute {
+                        hostname: hostname_clone.clone(),
+                        port,
+                        public_port: None,
+                        protocol: crate::routes::RouteProtocol::Http,
+                        pid: child_pid,
+                        cwd: cwd.to_string_lossy().to_string(),
+                    },
+                )
+                .await;
+                let _: std::result::Result<crate::proto::Response, _> = read_frame(&mut stream).await;
+            }
+
+            if config_clone.proxy.https {
+                println!("[{label}] → https://{hostname_clone}");
+            } else {
+                println!("[{label}] → http://{hostname_clone}");
+            }
+
+            let _ = child.wait().await;
+        });
+
+        handles.push(handle);
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
     Ok(())
 }
 
@@ -1820,5 +1945,26 @@ mod tests {
             run_sub.get_arguments().any(|a| a.get_id() == "force"),
             "run subcommand must have --force flag"
         );
+    }
+
+    #[test]
+    fn workspace_packages_found_in_pnpm_monorepo() {
+        use tempfile::TempDir;
+        let root = TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - \"apps/*\"\n",
+        ).unwrap();
+        let apps = root.path().join("apps").join("web");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(
+            apps.join("package.json"),
+            r#"{"name":"web","scripts":{"dev":"vite"}}"#,
+        ).unwrap();
+        std::fs::write(apps.join("pnpm-lock.yaml"), "").unwrap();
+
+        let config = crate::config::Config::default();
+        let pkgs = crate::workspace::discover_workspace_packages(root.path(), &config);
+        assert_eq!(pkgs.len(), 1);
     }
 }
