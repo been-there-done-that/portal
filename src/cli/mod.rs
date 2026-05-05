@@ -52,6 +52,11 @@ pub enum CliCommand {
     Status,
     /// Remove a route (without killing its process)
     Rm { hostname: String },
+    /// Print the public URL for a named service
+    Get {
+        /// App name (becomes <name>.<tld>) or full hostname
+        name: String,
+    },
     /// Register a static route for an already-running service
     Alias {
         /// App name (becomes <name>.localhost)
@@ -255,6 +260,27 @@ pub async fn run(cli: Cli) -> Result<()> {
             write_frame(&mut stream, &Command::Rm { hostname }).await?;
             let resp = read_frame(&mut stream).await?;
             output::print_response(&resp);
+        }
+
+        CliCommand::Get { name } => {
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::Config::load(&cwd)?;
+            let hostname = if name.contains('.') {
+                name.clone()
+            } else {
+                format!("{}.{}", name, config.proxy.tld)
+            };
+            let mut stream = ipc_connect().await?;
+            write_frame(&mut stream, &Command::GetUrl { hostname }).await?;
+            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            if resp.ok {
+                if let Some(url) = resp.data.as_ref().and_then(|d| d.get("url")).and_then(|u| u.as_str()) {
+                    println!("{url}");
+                }
+            } else {
+                eprintln!("error: {}", resp.error.unwrap_or_default());
+                std::process::exit(1);
+            }
         }
 
         CliCommand::Alias { name, port, force, remove } => {

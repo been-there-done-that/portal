@@ -355,6 +355,21 @@ async fn dispatch(
             Err(e) => Response::err(e.to_string()),
         },
 
+        Command::GetUrl { hostname } => {
+            match manager.get(&hostname) {
+                None => Response::err(format!("no route for \"{hostname}\"")),
+                Some(route) => {
+                    let url = public_url(https_enabled, &route.hostname, http_port, https_port);
+                    Response::ok(serde_json::json!({ "url": url }))
+                }
+            }
+        }
+
+        Command::Prune => {
+            // Placeholder — will be implemented in Task 3
+            Response::ok(serde_json::Value::Array(vec![]))
+        }
+
         Command::Run { .. } => Response::err("use portal run from CLI"),
     }
 }

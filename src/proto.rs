@@ -40,6 +40,10 @@ pub enum Command {
     HostsSync,
     /// Remove the portless-managed block from /etc/hosts
     HostsClean,
+    /// Get the public URL for a named service
+    GetUrl { hostname: String },
+    /// Find and kill orphaned dev server processes left by crashed CLI sessions
+    Prune,
 }
 
 /// Response sent from Daemon to CLI (IPC).
@@ -266,6 +270,19 @@ mod tests {
                 assert_eq!(protocol, crate::routes::RouteProtocol::Tcp);
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_get_url_command() {
+        let cmd = Command::GetUrl {
+            hostname: "myapp.localhost".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let back: Command = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            Command::GetUrl { hostname } => assert_eq!(hostname, "myapp.localhost"),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 }
