@@ -24,6 +24,29 @@ impl Default for ProxyConfig {
     }
 }
 
+impl ProxyConfig {
+    /// Build the public URL for a given hostname using this proxy configuration.
+    pub fn public_url(&self, hostname: &str) -> String {
+        public_url(self.https, hostname, self.http_port, self.https_port)
+    }
+}
+
+/// Build a public URL from individual parameters.
+/// Shared by CLI and daemon IPC code.
+pub fn public_url(https_enabled: bool, hostname: &str, http_port: u16, https_port: u16) -> String {
+    if https_enabled {
+        if https_port == 443 {
+            format!("https://{hostname}")
+        } else {
+            format!("https://{hostname}:{https_port}")
+        }
+    } else if http_port == 80 {
+        format!("http://{hostname}")
+    } else {
+        format!("http://{hostname}:{http_port}")
+    }
+}
+
 /// Daemon configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {

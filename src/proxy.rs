@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
@@ -88,6 +89,98 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedIo<S> {
     }
 }
 
+/// Handle to read the captured body prefix after the stream is consumed.
+#[derive(Clone)]
+pub struct CaptureHandle {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    total: std::sync::Arc<AtomicUsize>,
+    cap: usize,
+}
+
+impl CaptureHandle {
+    /// Take the captured prefix and total byte count.
+    pub fn take(&self) -> (Bytes, usize) {
+        let buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        (Bytes::from(buf.clone()), self.total.load(Ordering::Relaxed))
+    }
+
+    /// Build a CapturedBody from the capture.
+    pub fn to_captured_body(&self) -> crate::inspector::types::CapturedBody {
+        let (prefix, total) = self.take();
+        if prefix.is_empty() {
+            crate::inspector::types::CapturedBody::Empty
+        } else if total <= self.cap {
+            crate::inspector::types::CapturedBody::Full(prefix)
+        } else {
+            crate::inspector::types::CapturedBody::Truncated { prefix, total_bytes: total }
+        }
+    }
+}
+
+/// A body wrapper that forwards all frames to the consumer while capturing
+/// the first BODY_CAP bytes in a side buffer for the inspector.
+pub struct TeeBody<B> {
+    inner: B,
+    handle: CaptureHandle,
+}
+
+impl<B> TeeBody<B> {
+    pub fn new(inner: B) -> Self {
+        let cap = crate::inspector::types::BODY_CAP;
+        Self {
+            inner,
+            handle: CaptureHandle {
+                buf: std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(cap.min(65536)))),
+                total: std::sync::Arc::new(AtomicUsize::new(0)),
+                cap,
+            },
+        }
+    }
+
+    pub fn captured_handle(&self) -> CaptureHandle {
+        self.handle.clone()
+    }
+}
+
+impl<B> hyper::body::Body for TeeBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.handle.total.fetch_add(data.len(), Ordering::Relaxed);
+                    let mut buf = this.handle.buf.lock().unwrap_or_else(|e| e.into_inner());
+                    if buf.len() < this.handle.cap {
+                        let room = this.handle.cap - buf.len();
+                        let to_copy = data.len().min(room);
+                        buf.extend_from_slice(&data[..to_copy]);
+                    }
+                }
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 pub fn full_body(text: impl Into<Bytes>) -> BoxBodyType {
     Full::new(text.into())
         .map_err(|never| match never {})
@@ -134,7 +227,11 @@ pub async fn serve_http_redirect(
                 .lines()
                 .find(|line| line.to_lowercase().starts_with("host:"))
                 .and_then(|line| line.splitn(2, ':').nth(1))
-                .map(|h| h.trim().to_string())
+                .map(|h| {
+                    // Strip port if present: "myapp.localhost:8443" → "myapp.localhost"
+                    let trimmed = h.trim();
+                    trimmed.split(':').next().unwrap_or(trimmed).to_string()
+                })
                 .unwrap_or_else(|| "localhost".to_string());
 
             let location = if https_port == 443 {
@@ -223,6 +320,9 @@ pub async fn handle_https_request(
         }
     };
 
+    // Skip capturing inspector's own traffic — it's self-referential noise
+    let inspector = if hostname == "_.localhost" { None } else { inspector };
+
     if hops >= MAX_HOPS {
         return Ok(if accept_html {
             Response::builder()
@@ -279,7 +379,11 @@ pub async fn handle_https_request(
         .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
         .collect();
 
-    let req_body_bytes = match body.collect().await {
+    // Collect request body — capped at 10MB (request bodies in dev are typically small)
+    let req_body_bytes = match http_body_util::Limited::new(body, 10 * 1024 * 1024)
+        .collect()
+        .await
+    {
         Ok(c) => c.to_bytes(),
         Err(_) => {
             return Ok(if accept_html {
@@ -314,8 +418,10 @@ pub async fn handle_https_request(
         .headers
         .insert("x-forwarded-proto", "https".parse().unwrap());
 
-    let client: Client<HttpConnector, BoxBodyType> =
-        Client::builder(TokioExecutor::new()).build_http();
+    // Reuse a shared HTTP client for connection pooling and keep-alive
+    static HTTP_CLIENT: std::sync::OnceLock<Client<HttpConnector, BoxBodyType>> =
+        std::sync::OnceLock::new();
+    let client = HTTP_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http());
     let upstream_req = Request::from_parts(parts, full_body(req_body_bytes.clone()));
 
     match client.request(upstream_req).await {
@@ -329,28 +435,92 @@ pub async fn handle_https_request(
                 .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
                 .collect();
 
-            let resp_bytes = match resp_body.collect().await {
-                Ok(c) => c.to_bytes(),
-                Err(_) => bytes::Bytes::new(),
-            };
+            // Decide: stream large responses via TeeBody, collect small ones
+            let content_length = resp_parts
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<usize>().ok());
 
-            if let Some(sender) = &inspector {
-                use crate::inspector::types::{CapturedBody, CapturedRequest};
-                sender.send(CapturedRequest {
-                    hostname: hostname.clone(),
-                    method,
-                    path: path_and_query,
-                    req_headers,
-                    req_body: CapturedBody::from_bytes(&req_body_bytes),
-                    res_status,
-                    res_headers,
-                    res_body: CapturedBody::from_bytes(&resp_bytes),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                });
+            let should_stream = content_length.map_or(true, |cl| cl > crate::inspector::types::BODY_CAP);
+
+            if should_stream {
+                // Stream response body — capture first 1MB for inspector asynchronously
+                let tee = TeeBody::new(resp_body);
+                let res_handle = tee.captured_handle();
+
+                // Box the TeeBody into our standard body type
+                let boxed_body: BoxBodyType = http_body_util::BodyExt::boxed(tee);
+
+                // Fire inspector capture in background after response streams
+                if let Some(sender) = inspector {
+                    let hostname = hostname.clone();
+                    let req_body_capture = crate::inspector::types::CapturedBody::from_bytes(&req_body_bytes);
+                    tokio::spawn(async move {
+                        // Wait for the response body to be consumed (up to 30s)
+                        let mut last_total = 0usize;
+                        let mut stable_count = 0u32;
+                        for _ in 0..300u32 {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            let (_, total) = res_handle.take();
+                            if let Some(cl) = content_length {
+                                if total >= cl { break; }
+                            }
+                            if total > 0 && total == last_total {
+                                stable_count += 1;
+                                if stable_count >= 5 { break; } // no progress for 500ms
+                            } else {
+                                stable_count = 0;
+                            }
+                            last_total = total;
+                        }
+                        sender.send(crate::inspector::types::CapturedRequest {
+                            hostname,
+                            method,
+                            path: path_and_query,
+                            req_headers,
+                            req_body: req_body_capture,
+                            res_status,
+                            content_type: res_headers.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                                .map(|(_, v)| v.clone()),
+                            res_headers,
+                            res_body: res_handle.to_captured_body(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        });
+                    });
+                }
+
+                Ok(Response::from_parts(resp_parts, boxed_body))
+            } else {
+                // Small response — collect synchronously (existing pattern)
+                let resp_bytes = match resp_body.collect().await {
+                    Ok(c) => c.to_bytes(),
+                    Err(_) => bytes::Bytes::new(),
+                };
+
+                if let Some(sender) = &inspector {
+                    use crate::inspector::types::{CapturedBody, CapturedRequest};
+                    sender.send(CapturedRequest {
+                        hostname: hostname.clone(),
+                        method,
+                        path: path_and_query,
+                        req_headers,
+                        req_body: CapturedBody::from_bytes(&req_body_bytes),
+                        res_status,
+                        content_type: res_headers.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                            .map(|(_, v)| v.clone()),
+                        res_headers: res_headers.clone(),
+                        res_body: CapturedBody::from_bytes(&resp_bytes),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                    });
+                }
+
+                Ok(Response::from_parts(resp_parts, full_body(resp_bytes)))
             }
-
-            Ok(Response::from_parts(resp_parts, full_body(resp_bytes)))
         }
         Err(_) => Ok(if accept_html {
             Response::builder()
@@ -451,7 +621,12 @@ where
             }
         }
     }
-    let response_head = String::from_utf8_lossy(&buf);
+    // Split header bytes from any post-header data that arrived in the same read
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")
+        .map(|pos| pos + 4)
+        .unwrap_or(buf.len());
+    let post_header_data = buf[header_end..].to_vec();
+    let response_head = String::from_utf8_lossy(&buf[..header_end]);
     if !response_head.starts_with("HTTP/1.1 101") {
         return Ok(Response::builder()
             .status(StatusCode::BAD_GATEWAY)
@@ -493,6 +668,12 @@ where
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let mut client_io = hyper_util::rt::TokioIo::new(upgraded);
+                // Forward any bytes that arrived after the \r\n\r\n delimiter
+                if !post_header_data.is_empty() {
+                    if client_io.write_all(&post_header_data).await.is_err() {
+                        return;
+                    }
+                }
                 let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await;
             }
             Err(e) => {
@@ -728,6 +909,63 @@ mod tests {
     #[test]
     fn extract_host_returns_empty_on_none() {
         assert_eq!(extract_host(None), "");
+    }
+
+    #[tokio::test]
+    async fn tee_body_captures_and_forwards_full_body() {
+        use http_body_util::BodyExt;
+        let data = bytes::Bytes::from(vec![b'x'; 500]);
+        let original = full_body(data.clone());
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let collected = tee.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 500);
+        let (prefix, total) = handle.take();
+        assert_eq!(prefix.len(), 500);
+        assert_eq!(total, 500);
+    }
+
+    #[tokio::test]
+    async fn tee_body_truncates_capture_at_body_cap() {
+        use http_body_util::BodyExt;
+        let size = crate::inspector::types::BODY_CAP + 1000;
+        let data = bytes::Bytes::from(vec![b'y'; size]);
+        let original = full_body(data);
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let collected = tee.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), size);
+        let (prefix, total) = handle.take();
+        assert_eq!(prefix.len(), crate::inspector::types::BODY_CAP);
+        assert_eq!(total, size);
+    }
+
+    #[tokio::test]
+    async fn tee_body_empty() {
+        use http_body_util::BodyExt;
+        let original = full_body("");
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let collected = tee.collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 0);
+        let (prefix, total) = handle.take();
+        assert_eq!(prefix.len(), 0);
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn tee_body_captured_body_truncated() {
+        use http_body_util::BodyExt;
+        let size = crate::inspector::types::BODY_CAP + 500;
+        let data = bytes::Bytes::from(vec![b'z'; size]);
+        let original = full_body(data);
+        let tee = TeeBody::new(original);
+        let handle = tee.captured_handle();
+        let _ = tee.collect().await.unwrap();
+        let captured = handle.to_captured_body();
+        assert!(captured.is_truncated());
+        assert_eq!(captured.total_bytes(), size);
+        assert_eq!(captured.prefix_bytes().len(), crate::inspector::types::BODY_CAP);
     }
 
     #[tokio::test]

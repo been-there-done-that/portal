@@ -132,16 +132,31 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
         for path in &chown_paths {
             unsafe {
                 let p = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
-                nix::libc::chown(p.as_ptr(), uid, gid);
+                let ret = nix::libc::chown(p.as_ptr(), uid, gid);
+                if ret != 0 {
+                    tracing::warn!(
+                        "chown failed for {}: {}",
+                        path.display(),
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
         // Also chown any existing host certs so the non-root daemon can read them
         if let Ok(entries) = std::fs::read_dir(certs_dir.join("hosts")) {
             for entry in entries.flatten() {
                 unsafe {
+                    let entry_path = entry.path();
                     let p =
-                        std::ffi::CString::new(entry.path().to_string_lossy().as_bytes()).unwrap();
-                    nix::libc::chown(p.as_ptr(), uid, gid);
+                        std::ffi::CString::new(entry_path.to_string_lossy().as_bytes()).unwrap();
+                    let ret = nix::libc::chown(p.as_ptr(), uid, gid);
+                    if ret != 0 {
+                        tracing::warn!(
+                            "chown failed for {}: {}",
+                            entry_path.display(),
+                            std::io::Error::last_os_error()
+                        );
+                    }
                 }
             }
         }
@@ -221,10 +236,20 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
                 }
             };
 
-        let http_bind = format!("0.0.0.0:{}", config.proxy.http_port);
-        let https_bind = format!("0.0.0.0:{}", config.proxy.https_port);
-        let http_listener = tokio::net::TcpListener::bind(&http_bind).await?;
-        let https_listener = tokio::net::TcpListener::bind(&https_bind).await?;
+        // Use SO_REUSEADDR so the new daemon can bind immediately after the old
+        // one exits (even with TIME_WAIT connections from active browser sessions).
+        let http_listener = {
+            let sock = tokio::net::TcpSocket::new_v4()?;
+            sock.set_reuseaddr(true)?;
+            sock.bind(format!("0.0.0.0:{}", config.proxy.http_port).parse().unwrap())?;
+            sock.listen(1024)?
+        };
+        let https_listener = {
+            let sock = tokio::net::TcpSocket::new_v4()?;
+            sock.set_reuseaddr(true)?;
+            sock.bind(format!("0.0.0.0:{}", config.proxy.https_port).parse().unwrap())?;
+            sock.listen(1024)?
+        };
 
         tracing::info!(
             "portal daemon started (pid={}, mode={}, http={}, https={})",

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
-  import { store, selectRequest } from '$lib/stores/requests.svelte.js';
+  import { Badge } from '$lib/components/ui/badge/index.js';
+  import { store, selectRequest, loadOlder } from '$lib/stores/requests.svelte.js';
 
   function methodColor(method: string): string {
     if (method === 'GET') return 'text-green-500';
@@ -18,40 +18,72 @@
     return 'text-green-500';
   }
 
-  function formatTime(ms: number): string {
-    const d = new Date(ms);
-    return d.toLocaleTimeString('en-US', { hour12: false });
+  function formatTimestamp(ms: number): string {
+    return new Date(ms).toISOString().replace('T', ' ').slice(0, 23);
+  }
+
+  function contentCategory(ct: string | null, status: number): string {
+    if (!ct) return '';
+    const c = ct.toLowerCase();
+    if (status === 101) return 'ws';
+    if (c.includes('json') || c.includes('xml') || c.includes('text/plain')) return 'xhr';
+    if (c.includes('javascript')) return 'js';
+    if (c.includes('text/css')) return 'css';
+    if (c.startsWith('image/')) return 'img';
+    if (c.includes('text/html')) return 'doc';
+    if (c.includes('font')) return 'font';
+    return 'other';
+  }
+
+  function handleScroll(e: Event) {
+    const el = e.target as HTMLElement;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 100) {
+      loadOlder();
+    }
   }
 </script>
 
-<div class="flex flex-1 min-h-0 flex-col bg-background">
+<div class="flex flex-1 min-h-0 flex-col overflow-hidden">
   <!-- Column headers -->
   <div
-    class="grid flex-shrink-0 border-b border-border px-2 py-1"
-    style="grid-template-columns: 60px 50px 45px 160px 1fr 55px 55px"
+    class="grid shrink-0 items-center border-b border-border bg-card px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/40"
+    style="grid-template-columns: 140px 42px 36px 50px 150px 1fr 45px;"
   >
-    {#each ['TIME', 'METHOD', 'STATUS', 'SERVICE', 'PATH', 'DURATION', 'SIZE'] as col}
-      <span class="font-mono text-[9px] uppercase tracking-wider text-muted-foreground/50">{col}</span>
-    {/each}
+    <span>Time</span>
+    <span>Method</span>
+    <span>Status</span>
+    <span>Type</span>
+    <span>Service</span>
+    <span>Path</span>
+    <span class="text-right">Duration</span>
   </div>
 
-  <ScrollArea class="flex-1">
+  <!-- Rows -->
+  <div class="flex-1 min-h-0 overflow-y-auto" onscroll={handleScroll}>
     {#each store.filtered as req (req.id)}
       <button
-        class="grid w-full border-l-2 px-2 py-1.5 text-left transition-colors hover:bg-accent/30
-               {store.selectedId === req.id
-                 ? 'border-blue-500 bg-accent/50'
-                 : 'border-transparent'}"
-        style="grid-template-columns: 60px 50px 45px 160px 1fr 55px 55px"
+        class="grid w-full items-center border-b border-border/30 px-2 py-[3px] text-left font-mono transition-colors hover:bg-accent/20
+               {store.selectedId === req.id ? 'bg-blue-950/30 border-l-2 border-l-blue-500 pl-[6px]' : ''}"
+        style="grid-template-columns: 140px 42px 36px 50px 150px 1fr 45px;"
         onclick={() => selectRequest(req.id)}
       >
-        <span class="font-mono text-[10px] text-muted-foreground">{formatTime(req.timestamp)}</span>
-        <span class="font-mono text-[10px] font-medium {methodColor(req.method)}">{req.method}</span>
-        <span class="font-mono text-[10px] font-medium {statusColor(req.status)}">{req.status}</span>
-        <span class="truncate font-mono text-[10px] text-muted-foreground">{req.hostname}</span>
-        <span class="truncate font-mono text-[10px] text-foreground">{req.path}</span>
-        <span class="font-mono text-[10px] text-muted-foreground">{req.duration_ms}ms</span>
-        <span class="font-mono text-[10px] text-muted-foreground">—</span>
+        <span class="text-[10px] text-muted-foreground/60">{formatTimestamp(req.timestamp)}</span>
+        <span class="text-[10px] font-semibold {methodColor(req.method)}">{req.method}</span>
+        <span class="text-[10px] font-medium {statusColor(req.status)}">{req.status}</span>
+        <span class="text-[9px]">
+          {#if req.content_type}
+            <span class="inline-block rounded-sm bg-muted px-1 py-[1px] text-[8px] text-muted-foreground">{contentCategory(req.content_type, req.status)}</span>
+          {/if}
+        </span>
+        <span class="truncate text-[10px] text-muted-foreground">{req.hostname}</span>
+        <span class="truncate text-[10px] text-foreground/80">
+          {#if req.path.includes('?')}
+            {req.path.split('?')[0]}<span class="text-muted-foreground/30">?{req.path.split('?').slice(1).join('?')}</span>
+          {:else}
+            {req.path}
+          {/if}
+        </span>
+        <span class="text-right text-[10px] text-muted-foreground/50">{req.duration_ms}ms</span>
       </button>
     {/each}
 
@@ -60,5 +92,9 @@
         No requests yet
       </div>
     {/if}
-  </ScrollArea>
+
+    {#if store.loadingOlder}
+      <div class="py-2 text-center text-[9px] text-muted-foreground/50">Loading...</div>
+    {/if}
+  </div>
 </div>

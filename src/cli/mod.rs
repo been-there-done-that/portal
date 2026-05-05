@@ -752,7 +752,7 @@ async fn ipc_connect() -> Result<tokio::net::UnixStream> {
 }
 
 fn build_public_url(config: &crate::config::Config, hostname: &str) -> String {
-    build_public_url_parts(
+    crate::config::public_url(
         config.proxy.https,
         hostname,
         config.proxy.http_port,
@@ -764,24 +764,6 @@ fn portal_ca_cert_path() -> std::path::PathBuf {
     crate::config::dirs_for_state().join("certs").join("ca.pem")
 }
 
-fn build_public_url_parts(
-    https_enabled: bool,
-    hostname: &str,
-    http_port: u16,
-    https_port: u16,
-) -> String {
-    if https_enabled {
-        if https_port == 443 {
-            format!("https://{hostname}")
-        } else {
-            format!("https://{hostname}:{https_port}")
-        }
-    } else if http_port == 80 {
-        format!("http://{hostname}")
-    } else {
-        format!("http://{hostname}:{http_port}")
-    }
-}
 
 fn parse_command_line(input: &str) -> Result<Vec<String>> {
     let mut args = Vec::new();
@@ -1145,7 +1127,15 @@ fn check_ports_free(ports: &[u16]) -> Vec<u16> {
     ports
         .iter()
         .copied()
-        .filter(|&p| std::net::TcpListener::bind(("0.0.0.0", p)).is_err())
+        .filter(|&p| {
+            // Check if we can connect to the port — if a server is listening, the port is occupied.
+            // This avoids SO_REUSEADDR/TIME_WAIT issues that plague bind-based probes.
+            std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{p}").parse().unwrap(),
+                std::time::Duration::from_millis(100),
+            )
+            .is_ok()
+        })
         .collect()
 }
 
@@ -1384,8 +1374,12 @@ async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()>
         {
             use nix::sys::signal::{killpg, kill, Signal};
             use nix::unistd::Pid;
+            let raw = match i32::try_from(pid) {
+                Ok(v) if v > 0 => v,
+                _ => continue, // invalid PID — skip
+            };
             // Try killing the process group first
-            match killpg(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+            match killpg(Pid::from_raw(raw), Signal::SIGTERM) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EPERM) => {
                     // Root-owned — escalate via sudo kill on the process group
@@ -1399,7 +1393,7 @@ async fn kill_occupiers(pids: &[u32], ports: &[u16]) -> crate::error::Result<()>
                 }
                 Err(_) => {
                     // Process group kill failed — try single PID
-                    match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+                    match kill(Pid::from_raw(raw), Signal::SIGTERM) {
                         Ok(_) => {}
                         Err(nix::errno::Errno::EPERM) => {
                             let _ = tokio::process::Command::new("sudo")
@@ -1609,7 +1603,7 @@ mod tests {
     #[test]
     fn build_public_url_includes_non_default_https_port() {
         assert_eq!(
-            build_public_url_parts(true, "myapp.localhost", 80, 4443),
+            crate::config::public_url(true, "myapp.localhost", 80, 4443),
             "https://myapp.localhost:4443"
         );
     }
@@ -1617,7 +1611,7 @@ mod tests {
     #[test]
     fn build_public_url_uses_http_when_https_disabled() {
         assert_eq!(
-            build_public_url_parts(false, "myapp.localhost", 8080, 4443),
+            crate::config::public_url(false, "myapp.localhost", 8080, 4443),
             "http://myapp.localhost:8080"
         );
     }

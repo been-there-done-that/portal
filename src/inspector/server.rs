@@ -173,9 +173,7 @@ async fn stop_route(
         Some(r) => {
             #[cfg(unix)]
             if r.pid != 0 {
-                unsafe {
-                    nix::libc::killpg(r.pid as nix::libc::pid_t, nix::libc::SIGTERM);
-                }
+                crate::process::safe_killpg_term(r.pid);
             }
             let _ = state.routes.remove(&hostname).await;
             (StatusCode::OK, Json(serde_json::json!({ "ok": true })))

@@ -70,7 +70,14 @@ impl IpcServer {
                 unsafe {
                     let path = std::ffi::CString::new(self.sock_path.to_string_lossy().as_bytes())
                         .unwrap();
-                    nix::libc::chown(path.as_ptr(), uid, gid);
+                    let ret = nix::libc::chown(path.as_ptr(), uid, gid);
+                    if ret != 0 {
+                        tracing::warn!(
+                            "chown failed for {}: {}",
+                            self.sock_path.display(),
+                            std::io::Error::last_os_error()
+                        );
+                    }
                 }
             }
         }
@@ -154,17 +161,7 @@ fn user_hostnames(manager: &RouteManager) -> Vec<String> {
 }
 
 fn public_url(https_enabled: bool, hostname: &str, http_port: u16, https_port: u16) -> String {
-    if https_enabled {
-        if https_port == 443 {
-            format!("https://{hostname}")
-        } else {
-            format!("https://{hostname}:{https_port}")
-        }
-    } else if http_port == 80 {
-        format!("http://{hostname}")
-    } else {
-        format!("http://{hostname}:{http_port}")
-    }
+    crate::config::public_url(https_enabled, hostname, http_port, https_port)
 }
 
 fn display_target_for_route(
@@ -253,9 +250,7 @@ async fn dispatch(
                 Some(route) => {
                     #[cfg(unix)]
                     if route.pid != 0 {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::Pid;
-                        killpg(Pid::from_raw(route.pid as i32), Signal::SIGTERM).ok();
+                        crate::process::safe_killpg_term(route.pid);
                     }
                     if let Err(e) = manager.remove(&hostname).await {
                         tracing::warn!("failed to remove route {hostname}: {e}");
@@ -319,6 +314,10 @@ async fn dispatch(
             pid,
             cwd,
         } => {
+            // Validate hostname: must be non-empty, no newlines, reasonable length
+            if hostname.is_empty() || hostname.len() > 253 || hostname.contains('\n') || hostname.contains('\r') {
+                return Response::err("invalid hostname");
+            }
             let route = crate::routes::Route {
                 hostname: hostname.clone(),
                 port,

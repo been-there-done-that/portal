@@ -1,9 +1,16 @@
+pub mod certs;
+pub mod cli;
 pub mod config;
+pub mod daemon;
 pub mod detect;
 pub mod error;
 pub mod hosts;
+pub mod inspector;
+pub mod pages;
 pub mod ports;
 pub mod process;
+pub mod proto;
+pub mod proxy;
 pub mod route_manager;
 pub mod routes;
 pub mod tcp;

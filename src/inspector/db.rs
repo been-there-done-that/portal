@@ -32,19 +32,22 @@ impl Db {
                 res_headers     TEXT    NOT NULL,
                 res_body        BLOB,
                 res_truncated   INTEGER NOT NULL DEFAULT 0,
-                res_total_bytes INTEGER NOT NULL DEFAULT 0
+                res_total_bytes INTEGER NOT NULL DEFAULT 0,
+                content_type    TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_hostname  ON requests(hostname);
             CREATE INDEX IF NOT EXISTS idx_timestamp ON requests(timestamp DESC);",
         )
         .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
 
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN content_type TEXT;").ok();
+
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
 
     /// Insert a captured request and return the assigned row id.
     pub fn insert(&self, req: &CapturedRequest) -> crate::error::Result<i64> {
-        let conn = self.0.lock().unwrap();
+        let conn = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let req_headers_json = serde_json::to_string(&req.req_headers).unwrap_or_default();
         let res_headers_json = serde_json::to_string(&req.res_headers).unwrap_or_default();
 
@@ -52,8 +55,9 @@ impl Db {
             "INSERT INTO requests (
                 hostname, method, path, status, duration_ms, timestamp,
                 req_headers, req_body, req_truncated, req_total_bytes,
-                res_headers, res_body, res_truncated, res_total_bytes
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                res_headers, res_body, res_truncated, res_total_bytes,
+                content_type
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 req.hostname,
                 req.method,
@@ -69,6 +73,7 @@ impl Db {
                 req.res_body.prefix_bytes(),
                 req.res_body.is_truncated() as i32,
                 req.res_body.total_bytes() as i64,
+                req.content_type,
             ],
         )
         .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
@@ -87,14 +92,15 @@ impl Db {
         limit: usize,
         single_id: Option<i64>,
     ) -> crate::error::Result<Vec<RequestRecord>> {
-        let conn = self.0.lock().unwrap();
+        let conn = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let limit = limit.min(500) as i64;
 
         let rows = if let Some(id) = single_id {
             conn.prepare(
                 "SELECT id,hostname,method,path,status,duration_ms,timestamp,
                          req_headers,req_body,req_truncated,req_total_bytes,
-                         res_headers,res_body,res_truncated,res_total_bytes
+                         res_headers,res_body,res_truncated,res_total_bytes,
+                         content_type
                   FROM requests WHERE id=?1",
             )
             .and_then(|mut s| {
@@ -102,29 +108,52 @@ impl Db {
                     .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             })
         } else {
-            let (where_clause, p_hostname, p_before) = match (hostname, before_id) {
-                (Some(h), Some(b)) => ("WHERE hostname=?1 AND id<?2", Some(h.to_string()), Some(b)),
-                (Some(h), None) => ("WHERE hostname=?1", Some(h.to_string()), None),
-                (None, Some(b)) => ("WHERE id<?2", None, Some(b)),
-                (None, None) => ("", None, None),
-            };
-            let sql = format!(
-                "SELECT id,hostname,method,path,status,duration_ms,timestamp,
+            match (hostname, before_id) {
+                (Some(h), Some(b)) => {
+                    let sql = "SELECT id,hostname,method,path,status,duration_ms,timestamp,
                          req_headers,req_body,req_truncated,req_total_bytes,
-                         res_headers,res_body,res_truncated,res_total_bytes
-                  FROM requests {where_clause} ORDER BY id DESC LIMIT ?3"
-            );
-            conn.prepare(&sql).and_then(|mut s| {
-                s.query_map(
-                    params![
-                        p_hostname.as_deref().unwrap_or(""),
-                        p_before.unwrap_or(i64::MAX),
-                        limit
-                    ],
-                    row_to_record,
-                )
-                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-            })
+                         res_headers,res_body,res_truncated,res_total_bytes,
+                         content_type
+                  FROM requests WHERE hostname=?1 AND id<?2 ORDER BY id DESC LIMIT ?3";
+                    conn.prepare(sql).and_then(|mut s| {
+                        s.query_map(params![h, b, limit], row_to_record)
+                            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                    })
+                }
+                (Some(h), None) => {
+                    let sql = "SELECT id,hostname,method,path,status,duration_ms,timestamp,
+                         req_headers,req_body,req_truncated,req_total_bytes,
+                         res_headers,res_body,res_truncated,res_total_bytes,
+                         content_type
+                  FROM requests WHERE hostname=?1 ORDER BY id DESC LIMIT ?2";
+                    conn.prepare(sql).and_then(|mut s| {
+                        s.query_map(params![h, limit], row_to_record)
+                            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                    })
+                }
+                (None, Some(b)) => {
+                    let sql = "SELECT id,hostname,method,path,status,duration_ms,timestamp,
+                         req_headers,req_body,req_truncated,req_total_bytes,
+                         res_headers,res_body,res_truncated,res_total_bytes,
+                         content_type
+                  FROM requests WHERE id<?1 ORDER BY id DESC LIMIT ?2";
+                    conn.prepare(sql).and_then(|mut s| {
+                        s.query_map(params![b, limit], row_to_record)
+                            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                    })
+                }
+                (None, None) => {
+                    let sql = "SELECT id,hostname,method,path,status,duration_ms,timestamp,
+                         req_headers,req_body,req_truncated,req_total_bytes,
+                         res_headers,res_body,res_truncated,res_total_bytes,
+                         content_type
+                  FROM requests ORDER BY id DESC LIMIT ?1";
+                    conn.prepare(sql).and_then(|mut s| {
+                        s.query_map(params![limit], row_to_record)
+                            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                    })
+                }
+            }
         };
 
         rows.map_err(|e| crate::error::Error::Ipc(e.to_string()))
@@ -132,7 +161,7 @@ impl Db {
 
     /// Delete a single request by id.
     pub fn delete_one(&self, id: i64) -> crate::error::Result<()> {
-        let conn = self.0.lock().unwrap();
+        let conn = self.0.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM requests WHERE id=?1", params![id])
             .map_err(|e| crate::error::Error::Ipc(e.to_string()))?;
         Ok(())
@@ -140,7 +169,7 @@ impl Db {
 
     /// Delete all requests, optionally filtered by hostname.
     pub fn delete_all(&self, hostname: Option<&str>) -> crate::error::Result<()> {
-        let conn = self.0.lock().unwrap();
+        let conn = self.0.lock().unwrap_or_else(|e| e.into_inner());
         match hostname {
             Some(h) => conn.execute("DELETE FROM requests WHERE hostname=?1", params![h]),
             None => conn.execute("DELETE FROM requests", []),
@@ -172,6 +201,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
         res_body: String::from_utf8_lossy(&res_body_bytes).into_owned(),
         res_truncated: row.get::<_, i32>(13)? != 0,
         res_total_bytes: row.get::<_, i64>(14)? as usize,
+        content_type: row.get(15).ok(),
     })
 }
 
@@ -197,6 +227,7 @@ mod tests {
             res_body: CapturedBody::Full(bytes::Bytes::from("[]".as_bytes())),
             duration_ms: 42,
             timestamp: 1712500321000,
+            content_type: Some("application/json".to_string()),
         }
     }
 

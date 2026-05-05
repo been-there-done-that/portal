@@ -6,6 +6,7 @@ export interface RequestMeta {
   status: number;
   duration_ms: number;
   timestamp: number;
+  content_type: string | null;
 }
 
 export interface RequestRecord extends RequestMeta {

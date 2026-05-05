@@ -1,5 +1,5 @@
 use crate::error::Result;
-use rand::seq::SliceRandom;
+use rand::Rng;
 use std::net::TcpListener;
 
 pub const BLOCKED_PORTS: &[u16] = &[
@@ -35,48 +35,39 @@ pub fn validate_app_port(port: u16) -> Result<()> {
 /// Skips browser-blocked ports and ports < 1024.
 /// Returns Error::NoFreePort if no port is available.
 pub fn find_free_port(lo: u16, hi: u16) -> Result<u16> {
-    let mut ports: Vec<u16> = (lo..=hi).collect();
-
-    // Shuffle the ports for randomness
+    let range_size = (hi as usize).saturating_sub(lo as usize) + 1;
     let mut rng = rand::thread_rng();
-    ports.shuffle(&mut rng);
 
-    for port in ports {
-        // Skip browser-blocked ports
-        if is_browser_blocked(port) {
-            continue;
-        }
+    for _ in 0..range_size {
+        let port = rng.gen_range(lo..=hi);
 
-        // Skip privileged ports (< 1024)
-        if port < 1024 {
+        // Skip browser-blocked and privileged ports
+        if is_browser_blocked(port) || port < 1024 {
             continue;
         }
 
         // Try to bind to the port
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
-            // Successfully bound — port is free
-            drop(listener); // Close the listener immediately
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Ok(port);
         }
     }
 
-    // No free port found
+    // No free port found in the allotted probes
     Err(crate::error::Error::NoFreePort(lo, hi))
 }
 
 pub fn find_free_port_excluding(lo: u16, hi: u16, excluded: &[u16]) -> Result<u16> {
-    let mut ports: Vec<u16> = (lo..=hi).collect();
-
+    let range_size = (hi as usize).saturating_sub(lo as usize) + 1;
     let mut rng = rand::thread_rng();
-    ports.shuffle(&mut rng);
 
-    for port in ports {
+    for _ in 0..range_size {
+        let port = rng.gen_range(lo..=hi);
+
         if excluded.contains(&port) || is_browser_blocked(port) || port < 1024 {
             continue;
         }
 
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{port}")) {
-            drop(listener);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Ok(port);
         }
     }
@@ -92,12 +83,10 @@ pub async fn wait_for_port_free(port: u16, timeout: std::time::Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         // Port is truly free when we can bind to it (not just when connect fails).
-        // Bind 0.0.0.0 (wildcard) — macOS allows binding a specific address (127.0.0.1)
-        // even when 0.0.0.0 is already owned by another process, so 127.0.0.1 is not
-        // a reliable check. spawn_blocking keeps this blocking syscall off the async
-        // executor.
+        // Bind 127.0.0.1 to avoid briefly listening on all interfaces.
+        // spawn_blocking keeps this blocking syscall off the async executor.
         let free = tokio::task::spawn_blocking(move || {
-            std::net::TcpListener::bind(format!("0.0.0.0:{port}")).is_ok()
+            std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok()
         })
         .await
         .unwrap_or(false);
@@ -217,14 +206,13 @@ mod tests {
     #[tokio::test]
     async fn wait_for_port_free_waits_until_port_is_released() {
         // Bind a random port, then release it after 200ms — verify we wait for it.
-        // Use 0.0.0.0 so wait_for_port_free's wildcard bind check detects it correctly.
-        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         // Release the listener after 200ms from a background task
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            drop(listener);
+            drop(listener); // port released here
         });
 
         let start = std::time::Instant::now();
@@ -259,8 +247,7 @@ mod tests {
     async fn times_out_when_port_stays_bound() {
         use std::net::TcpListener;
         // Bind port 19996 to simulate a still-running process.
-        // Use 0.0.0.0 so wait_for_port_free's wildcard bind check detects it correctly.
-        let listener = TcpListener::bind("0.0.0.0:19996").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:19996").unwrap();
         let start = std::time::Instant::now();
         // Wait with a 350ms timeout
         wait_for_port_free(19996, std::time::Duration::from_millis(350)).await;
