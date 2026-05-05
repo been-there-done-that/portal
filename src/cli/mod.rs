@@ -41,6 +41,9 @@ pub enum CliCommand {
         /// Treat as a TCP service (skip HTTPS proxy; for databases, caches, etc.)
         #[arg(long)]
         tcp: bool,
+        /// Kill any existing process registered under this hostname and replace it
+        #[arg(long)]
+        force: bool,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -215,6 +218,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 None,
                 true,
                 quiet,
+                false,
                 false,
             )
             .await?;
@@ -486,6 +490,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             port,
             quiet,
             tcp,
+            force,
             args,
         } => {
             let cwd = std::env::current_dir()?;
@@ -500,6 +505,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 false,
                 quiet,
                 tcp,
+                force,
             )
             .await?;
         }
@@ -616,6 +622,7 @@ async fn do_run(
     use_full_registry: bool,
     quiet: bool,
     tcp: bool,
+    force: bool,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -651,6 +658,32 @@ async fn do_run(
             None
         }
     };
+
+    // Guard: error if route is live and --force not set
+    if let Some(ref route) = existing_route {
+        if !force && route.pid != 0 {
+            let alive = {
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::kill;
+                    use nix::unistd::Pid;
+                    match i32::try_from(route.pid) {
+                        Ok(pid) if pid > 0 => kill(Pid::from_raw(pid), None).is_ok(),
+                        _ => false,
+                    }
+                }
+                #[cfg(not(unix))]
+                { false }
+            };
+            if alive {
+                eprintln!(
+                    "error: {} is already running (PID {}). Use --force to replace it.",
+                    hostname, route.pid
+                );
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Detect driver early — needed for service_port_candidates and injection.
     let registry = crate::detect::DriverRegistry::new(&config);
@@ -1758,5 +1791,16 @@ mod tests {
             crate::daemon::DaemonMode::TcpOnly,
             DaemonRequirement::Full
         ));
+    }
+
+    #[test]
+    fn run_command_has_force_arg() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let run_sub = cmd.find_subcommand("run").expect("run subcommand");
+        assert!(
+            run_sub.get_arguments().any(|a| a.get_id() == "force"),
+            "run subcommand must have --force flag"
+        );
     }
 }
