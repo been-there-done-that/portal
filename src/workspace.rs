@@ -23,9 +23,8 @@ pub fn find_workspace_root(cwd: &Path) -> Option<PathBuf> {
                 }
             }
         }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => return None,
+        if !dir.pop() {
+            return None;
         }
     }
 }
@@ -111,17 +110,25 @@ fn expand_glob(root: &Path, pattern: &str) -> Vec<PathBuf> {
     let clean = pattern.trim_end_matches('/');
     if let Some(prefix) = clean.strip_suffix("/*") {
         let parent = root.join(prefix);
-        if let Ok(entries) = std::fs::read_dir(&parent) {
-            return entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect();
+        if parent.starts_with(root) {
+            if let Ok(entries) = std::fs::read_dir(&parent) {
+                return entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir() && p.starts_with(root))
+                    .collect();
+            }
         }
         return vec![];
     }
     let p = root.join(clean);
-    if p.is_dir() { vec![p] } else { vec![] }
+    if p.is_dir() && p.starts_with(root) {
+        return vec![p];
+    }
+    if clean.contains('*') {
+        tracing::warn!("workspace: glob pattern {:?} is not supported (only dir/* is); skipping", pattern);
+    }
+    vec![]
 }
 
 #[cfg(test)]
@@ -179,6 +186,20 @@ mod tests {
         let pkgs = discover_workspace_packages(root.path(), &config);
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].name, "web");
+    }
+
+    #[test]
+    fn finds_workspace_root_from_subdirectory() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - \"packages/*\"\n",
+        ).unwrap();
+        let subdir = root.path().join("packages").join("myapp");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let found = find_workspace_root(&subdir);
+        assert_eq!(found, Some(root.path().to_path_buf()));
     }
 
     #[test]
