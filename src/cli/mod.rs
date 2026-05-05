@@ -918,7 +918,7 @@ fn portal_ca_cert_path() -> std::path::PathBuf {
 }
 
 
-fn parse_command_line(input: &str) -> Result<Vec<String>> {
+pub(crate) fn parse_command_line(input: &str) -> Result<Vec<String>> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut chars = input.chars().peekable();
