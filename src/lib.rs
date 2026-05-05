@@ -6,6 +6,7 @@ pub mod detect;
 pub mod error;
 pub mod hosts;
 pub mod inspector;
+pub mod lan;
 pub mod pages;
 pub mod ports;
 pub mod process;

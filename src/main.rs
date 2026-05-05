@@ -6,6 +6,7 @@ mod detect;
 mod error;
 mod hosts;
 mod inspector;
+mod lan;
 mod pages;
 mod ports;
 mod process;
