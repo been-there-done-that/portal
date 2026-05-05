@@ -642,7 +642,6 @@ async fn run_monorepo(
     let mut handles = Vec::new();
 
     for pkg in packages {
-        let _pkg_config = crate::config::Config::load(&pkg.dir).unwrap_or_else(|_| config.clone());
         let hostname = crate::detect::resolve_hostname(
             &pkg.dir,
             None,
@@ -703,20 +702,25 @@ async fn run_monorepo(
             };
 
             let child_pid = child.id().unwrap_or(std::process::id());
-            if let Ok(mut stream) = ipc_connect().await {
-                let _ = write_frame(
-                    &mut stream,
-                    &Command::RegisterRoute {
-                        hostname: hostname_clone.clone(),
-                        port,
-                        public_port: None,
-                        protocol: crate::routes::RouteProtocol::Http,
-                        pid: child_pid,
-                        cwd: cwd.to_string_lossy().to_string(),
-                    },
-                )
-                .await;
-                let _: std::result::Result<crate::proto::Response, _> = read_frame(&mut stream).await;
+            match ipc_connect().await {
+                Ok(mut stream) => {
+                    let _ = write_frame(
+                        &mut stream,
+                        &Command::RegisterRoute {
+                            hostname: hostname_clone.clone(),
+                            port,
+                            public_port: None,
+                            protocol: crate::routes::RouteProtocol::Http,
+                            pid: child_pid,
+                            cwd: cwd.to_string_lossy().to_string(),
+                        },
+                    )
+                    .await;
+                    let _: std::result::Result<crate::proto::Response, _> = read_frame(&mut stream).await;
+                }
+                Err(_) => {
+                    eprintln!("[{label}] warning: could not register route with daemon");
+                }
             }
 
             if config_clone.proxy.https {
@@ -732,7 +736,9 @@ async fn run_monorepo(
     }
 
     for h in handles {
-        let _ = h.await;
+        if let Err(e) = h.await {
+            eprintln!("worker task panicked: {e}");
+        }
     }
     Ok(())
 }
