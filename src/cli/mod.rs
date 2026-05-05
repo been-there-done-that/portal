@@ -59,6 +59,12 @@ pub enum CliCommand {
     },
     /// Find and kill orphaned dev servers left by crashed CLI sessions
     Prune,
+    /// Stop daemon, remove CA trust, and delete all portal state
+    Clean {
+        /// Skip confirmation prompt (required in CI / non-interactive mode)
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Register a static route for an already-running service
     Alias {
         /// App name (becomes <name>.localhost)
@@ -306,6 +312,51 @@ pub async fn run(cli: Cli) -> Result<()> {
                 eprintln!("error: {}", resp.error.unwrap_or_default());
                 std::process::exit(1);
             }
+        }
+
+        CliCommand::Clean { yes } => {
+            use std::io::IsTerminal;
+            let is_ci = std::env::var("CI").map(|v| !v.is_empty()).unwrap_or(false);
+            let is_tty = std::io::stdin().is_terminal();
+
+            if !yes {
+                if is_ci || !is_tty {
+                    eprintln!("error: --yes required in non-interactive mode");
+                    std::process::exit(1);
+                }
+                use dialoguer::Confirm;
+                let confirmed = Confirm::new()
+                    .with_prompt("This will stop the daemon and remove all portal state. Continue?")
+                    .default(false)
+                    .interact()
+                    .unwrap_or(false);
+                if !confirmed {
+                    return Ok(());
+                }
+            }
+
+            // 1. Try graceful shutdown (ignores error if daemon not running)
+            if let Ok(mut stream) = ipc_connect().await {
+                let _ = write_frame(&mut stream, &Command::Shutdown).await;
+                let _: std::result::Result<crate::proto::Response, _> = read_frame(&mut stream).await;
+                // Give daemon time to clean up hosts + remove socket
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+
+            // 2. Untrust CA (best-effort)
+            if let Err(e) = crate::certs::untrust_system_ca() {
+                eprintln!("warning: could not untrust CA: {e}");
+            }
+
+            // 3. Remove state directory
+            let state_dir = crate::config::dirs_for_state();
+            if state_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                    eprintln!("warning: could not remove state dir: {e}");
+                }
+            }
+
+            println!("portal state cleared");
         }
 
         CliCommand::Alias { name, port, force, remove } => {
