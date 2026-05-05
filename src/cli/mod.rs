@@ -44,6 +44,12 @@ pub enum CliCommand {
         /// Kill any existing process registered under this hostname and replace it
         #[arg(long)]
         force: bool,
+        /// Expose this app to the local network via mDNS .local hostname
+        #[arg(long)]
+        lan: bool,
+        /// Override the auto-detected LAN IP (e.g. for VPN setups)
+        #[arg(long, value_name = "ADDR")]
+        ip: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -500,10 +506,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             quiet,
             tcp,
             force,
+            lan,
+            ip,
             args,
         } => {
             let cwd = std::env::current_dir()?;
-            let config = crate::config::Config::load(&cwd)?;
+            let mut config = crate::config::Config::load(&cwd)?;
+            if lan { config.proxy.lan = true; }
+            if let Some(addr) = ip { config.proxy.lan_ip = Some(addr); }
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
             do_run(
                 cwd,
@@ -1009,6 +1019,14 @@ async fn do_run(
             );
         } else {
             banner::print_banner(&public_url, port, child_pid, existing_route.is_some());
+        }
+        if config.proxy.lan {
+            let ip = config.proxy.lan_ip.as_deref()
+                .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+                .or_else(|| crate::lan::detect_lan_ip());
+            if let Some(ip) = ip {
+                println!("  LAN: https://{ip}  (from other devices on your network)");
+            }
         }
     }
 

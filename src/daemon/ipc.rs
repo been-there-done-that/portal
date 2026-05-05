@@ -329,7 +329,22 @@ async fn dispatch(
                 created_at: chrono::Utc::now(),
             };
             match manager.insert(route).await {
-                Ok(_) => Response::ok_empty(),
+                Ok(_) => {
+                    let lan_enabled = std::env::var("PORTLESS_LAN")
+                        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+                        .unwrap_or(false);
+                    if lan_enabled && protocol == crate::routes::RouteProtocol::Http {
+                        let ip_str = std::env::var("PORTLESS_LAN_IP").ok();
+                        let ip = ip_str
+                            .as_deref()
+                            .and_then(|s| s.parse().ok())
+                            .or_else(crate::lan::detect_lan_ip);
+                        if let Some(ip) = ip {
+                            let _ = crate::lan::publish_mdns(&hostname, ip, http_port);
+                        }
+                    }
+                    Response::ok_empty()
+                }
                 Err(e) => Response::err(e.to_string()),
             }
         }

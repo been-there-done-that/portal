@@ -11,6 +11,8 @@ pub struct ProxyConfig {
     pub http_port: u16,
     pub https_port: u16,
     pub wildcard: bool,
+    pub lan: bool,
+    pub lan_ip: Option<String>,
 }
 
 impl Default for ProxyConfig {
@@ -22,6 +24,8 @@ impl Default for ProxyConfig {
             http_port: 80,
             https_port: 443,
             wildcard: false,
+            lan: false,
+            lan_ip: None,
         }
     }
 }
@@ -107,6 +111,8 @@ struct PartialProxyConfig {
     http_port: Option<u16>,
     https_port: Option<u16>,
     wildcard: Option<bool>,
+    lan: Option<bool>,
+    lan_ip: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -196,6 +202,12 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     if let Some(wildcard) = partial.proxy.wildcard {
         config.proxy.wildcard = wildcard;
     }
+    if let Some(lan) = partial.proxy.lan {
+        config.proxy.lan = lan;
+    }
+    if let Some(lan_ip) = partial.proxy.lan_ip {
+        config.proxy.lan_ip = Some(lan_ip);
+    }
 
     if let Some(log_level) = partial.daemon.log_level {
         config.daemon.log_level = log_level;
@@ -251,6 +263,8 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
                 config.project.proxy = Some(matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
             }
             "PORTLESS_WILDCARD" => config.proxy.wildcard = matches!(*value, "1" | "true" | "yes" | "on"),
+            "PORTLESS_LAN" => config.proxy.lan = matches!(*value, "1" | "true" | "yes" | "on"),
+            "PORTLESS_LAN_IP" => config.proxy.lan_ip = Some(value.to_string()),
             _ => {
                 // Ignore unknown env vars
             }
