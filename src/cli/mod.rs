@@ -793,6 +793,24 @@ async fn do_run(
         None
     };
 
+    // Skip proxy if forced by config or if command is a known build-only tool
+    let is_build_only_cmd = config.project.proxy == Some(false)
+        || crate::process::is_build_only(&args);
+
+    if is_build_only_cmd {
+        // Run directly without registering a proxy route
+        let mut child = crate::process::spawn_child(
+            &cwd,
+            &args,
+            0,
+            crate::detect::PortInjection::EnvOnly,
+            &[],
+        )
+        .await?;
+        let _ = child.wait().await;
+        return Ok(());
+    }
+
     let injection = driver
         .map(|d| d.port_injection(&cwd, port))
         .unwrap_or(crate::detect::PortInjection::EnvOnly);

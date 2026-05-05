@@ -74,6 +74,8 @@ pub struct ProjectConfig {
     pub port_position: Option<String>,
     /// Name of the env var to use for passing the port (e.g. "APP_PORT")
     pub port_env: Option<String>,
+    /// Whether to proxy this service (None = auto-detect, Some(false) = build-only mode, Some(true) = force proxy)
+    pub proxy: Option<bool>,
 }
 
 /// Complete configuration
@@ -118,6 +120,7 @@ struct PartialProjectConfig {
     host_arg: Option<String>,
     port_position: Option<String>,
     port_env: Option<String>,
+    proxy: Option<bool>,
 }
 
 impl Config {
@@ -213,6 +216,9 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     if partial.project.port_env.is_some() {
         config.project.port_env = partial.project.port_env;
     }
+    if partial.project.proxy.is_some() {
+        config.project.proxy = partial.project.proxy;
+    }
 }
 
 /// Apply environment variable overrides
@@ -234,6 +240,9 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
             }
             "PORTAL_PORT_ENV" => {
                 config.project.port_env = Some(value.to_string());
+            }
+            "PORTLESS_PROXY" => {
+                config.project.proxy = Some(matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
             }
             _ => {
                 // Ignore unknown env vars
