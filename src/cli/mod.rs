@@ -637,7 +637,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         CliCommand::Inspect => {
-            let url = "https://_.localhost";
+            let url = "https://_.logs";
             #[cfg(target_os = "macos")]
             {
                 std::process::Command::new("open").arg(url).spawn().ok();

@@ -152,7 +152,7 @@ async fn handle_connection(
     write_frame(&mut stream, &response).await.ok();
 }
 
-/// Collect hostnames of all HTTP routes for hosts-file sync (includes internal portal.localhost).
+/// Collect hostnames of all HTTP routes for hosts-file sync (includes internal _.logs).
 fn user_hostnames(manager: &RouteManager) -> Vec<String> {
     manager.list().into_iter()
         .filter(|r| r.protocol == RouteProtocol::Http)
@@ -216,7 +216,7 @@ async fn dispatch(
             let list: Vec<_> = manager
                 .list()
                 .into_iter()
-                .filter(|r| r.hostname != "portal.localhost")
+                .filter(|r| r.hostname != "_.logs")
                 .map(|route| route_response_value(&route, https_enabled, http_port, https_port))
                 .collect();
             Response::ok(serde_json::Value::Array(list))
@@ -227,7 +227,7 @@ async fn dispatch(
             let routes_count = manager
                 .list()
                 .iter()
-                .filter(|r| r.hostname != "portal.localhost")
+                .filter(|r| r.hostname != "_.logs")
                 .count();
             Response::ok(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
@@ -392,7 +392,7 @@ async fn dispatch(
             let mut pruned: Vec<String> = Vec::new();
 
             for route in routes {
-                if route.hostname == "portal.localhost" {
+                if route.hostname == "_.logs" {
                     continue;
                 }
                 // Alias routes (pid == 0) are intentionally persistent
@@ -601,12 +601,12 @@ mod tests {
     fn ls_hides_inspector_route() {
         let routes: Vec<String> = vec![
             "myapp.localhost".to_string(),
-            "portal.localhost".to_string(),
+            "_.logs".to_string(),
             "api.localhost".to_string(),
         ];
-        let filtered: Vec<&String> = routes.iter().filter(|h| *h != "portal.localhost").collect();
+        let filtered: Vec<&String> = routes.iter().filter(|h| *h != "_.logs").collect();
         assert_eq!(filtered.len(), 2);
-        assert!(!filtered.iter().any(|h| *h == "portal.localhost"));
+        assert!(!filtered.iter().any(|h| *h == "_.logs"));
     }
 
     #[tokio::test]
@@ -639,7 +639,7 @@ mod tests {
         // Insert the internal inspector route
         store
             .insert(crate::routes::Route {
-                hostname: "portal.localhost".to_string(),
+                hostname: "_.logs".to_string(),
                 port: 9999,
                 public_port: None,
                 protocol: crate::routes::RouteProtocol::Http,
@@ -660,7 +660,7 @@ mod tests {
         // portal.localhost is now included so the browser can resolve it via /etc/hosts
         assert_eq!(result.len(), 2);
         assert!(result.contains(&"myapp.localhost".to_string()));
-        assert!(result.contains(&"portal.localhost".to_string()));
+        assert!(result.contains(&"_.logs".to_string()));
     }
 
     #[test]

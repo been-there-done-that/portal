@@ -130,13 +130,77 @@ pub fn sync_hosts_file_at(hostnames: &[&str], path: &std::path::Path) -> crate::
 }
 
 /// Sync the real /etc/hosts with the given hostnames, then flush the macOS DNS cache.
+///
+/// When the direct write fails (permission denied — daemon running without root),
+/// falls back to `sudo -n tee /etc/hosts` which succeeds silently if sudo credentials
+/// are still cached from a recent session.
 pub fn sync_hosts_file(hostnames: &[&str]) -> crate::error::Result<()> {
-    sync_hosts_file_at(hostnames, &hosts_path())?;
+    let path = hosts_path();
+    if let Err(e) = sync_hosts_file_at(hostnames, &path) {
+        #[cfg(unix)]
+        {
+            use std::io::ErrorKind;
+            let is_perm = matches!(
+                &e,
+                crate::error::Error::Io(io) if io.kind() == ErrorKind::PermissionDenied
+            );
+
+            if is_perm {
+                // Non-root daemon: attempt non-interactive sudo tee.
+                // Succeeds silently when sudo credentials are cached; fails silently otherwise.
+                if !sync_via_sudo_tee(hostnames, &path) {
+                    return Err(e);
+                }
+            } else {
+                return Err(e);
+            }
+        }
+        #[cfg(not(unix))]
+        return Err(e);
+    }
 
     #[cfg(target_os = "macos")]
     flush_dns_cache();
 
     Ok(())
+}
+
+/// Write the hosts block via `sudo -n tee /etc/hosts` (non-interactive).
+/// Returns true if the write succeeded (credentials were cached), false otherwise.
+#[cfg(unix)]
+fn sync_via_sudo_tee(hostnames: &[&str], path: &std::path::Path) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let content = {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let cleaned = remove_block(&existing);
+        if hostnames.is_empty() {
+            cleaned
+        } else {
+            let block = build_block(hostnames);
+            format!("{}\n{}\n", cleaned.trim_end(), block)
+        }
+    };
+
+    let mut child = match Command::new("sudo")
+        .args(["-n", "tee"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(content.as_bytes());
+    }
+    drop(child.stdin.take());
+
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Remove the portless-managed block from /etc/hosts.
