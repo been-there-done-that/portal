@@ -22,6 +22,14 @@ impl RouteManager {
         self.store.get(hostname)
     }
 
+    pub fn get_slot(&self, hostname: &str, slot: u32) -> Option<Route> {
+        self.store.get_slot(hostname, slot)
+    }
+
+    pub fn list_slots(&self, hostname: &str) -> Vec<Route> {
+        self.store.list_slots(hostname)
+    }
+
     pub fn list(&self) -> Vec<Route> {
         self.store.list()
     }
@@ -42,6 +50,11 @@ impl RouteManager {
     pub async fn remove(&self, hostname: &str) -> Result<()> {
         self.tcp.remove(hostname).await;
         self.store.remove(hostname).await
+    }
+
+    pub async fn remove_slot(&self, hostname: &str, slot: u32) -> crate::error::Result<()> {
+        self.tcp.remove(hostname).await; // TCP routes don't use slots, safe to no-op
+        self.store.remove_slot(hostname, slot).await
     }
 
     pub async fn remove_stale(&self) -> Result<Vec<Route>> {

@@ -48,7 +48,7 @@ pub struct Route {
 /// and atomically update routes.json + /etc/hosts in one locked transaction.
 #[derive(Clone)]
 pub struct StateStore {
-    map: Arc<DashMap<String, Route>>,
+    map: Arc<DashMap<String, Vec<Route>>>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
     path: PathBuf,
 }
@@ -56,13 +56,13 @@ pub struct StateStore {
 impl StateStore {
     /// Create a new StateStore. Loads existing routes from disk if file exists.
     pub fn new(path: PathBuf) -> Result<Self> {
-        let map = Arc::new(DashMap::new());
+        let map: Arc<DashMap<String, Vec<Route>>> = Arc::new(DashMap::new());
         if path.exists() {
             let contents = std::fs::read_to_string(&path)?;
             if !contents.is_empty() {
                 let routes: Vec<Route> = serde_json::from_str(&contents)?;
                 for route in routes {
-                    map.insert(route.hostname.clone(), route);
+                    map.entry(route.hostname.clone()).or_default().push(route);
                 }
             }
         }
@@ -76,18 +76,55 @@ impl StateStore {
     // ── Read API (lock-free) ──────────────────────────────────────────────
 
     pub fn get(&self, hostname: &str) -> Option<Route> {
-        self.map.get(hostname).map(|e| e.clone())
+        self.map.get(hostname).and_then(|v| v.first().cloned())
+    }
+
+    pub fn get_slot(&self, hostname: &str, slot: u32) -> Option<Route> {
+        self.map
+            .get(hostname)
+            .and_then(|v| v.iter().find(|r| r.slot == slot).cloned())
+    }
+
+    pub fn list_slots(&self, hostname: &str) -> Vec<Route> {
+        self.map
+            .get(hostname)
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     pub fn list(&self) -> Vec<Route> {
-        self.map.iter().map(|e| e.value().clone()).collect()
+        self.map
+            .iter()
+            .flat_map(|e| e.value().clone())
+            .collect()
     }
 
     // ── Write API (serialised) ────────────────────────────────────────────
 
-    pub async fn insert(&self, route: Route) -> Result<()> {
+    pub async fn insert(&self, mut route: Route) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        self.map.insert(route.hostname.clone(), route);
+        let mut entry = self.map.entry(route.hostname.clone()).or_default();
+        let slots = entry.value_mut();
+        if slots.is_empty() {
+            // First route for this hostname — slot stays as-is (0 or what was set)
+        } else if route.slot == 0 {
+            // Auto-assign next slot (caller didn't specify one)
+            let max_slot = slots.iter().map(|r| r.slot).max().unwrap_or(0);
+            route.slot = max_slot + 1;
+        } else {
+            // Non-zero explicit slot: replace if exists, otherwise push
+            if let Some(existing) = slots.iter_mut().find(|r| r.slot == route.slot) {
+                *existing = route;
+                drop(entry);
+                self.persist_locked()?;
+                self.sync_hosts_locked();
+                return Ok(());
+            }
+        }
+        slots.push(route);
+        // Sort by slot number to maintain ordering
+        slots.sort_by_key(|r| r.slot);
+        drop(entry);
         self.persist_locked()?;
         self.sync_hosts_locked();
         Ok(())
@@ -101,29 +138,80 @@ impl StateStore {
         Ok(())
     }
 
+    pub async fn remove_slot(&self, hostname: &str, slot: u32) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let mut changed = false;
+        {
+            let mut entry = match self.map.get_mut(hostname) {
+                Some(e) => e,
+                None => return Ok(()),
+            };
+            let slots = entry.value_mut();
+            let before = slots.len();
+            slots.retain(|r| r.slot != slot);
+            changed = slots.len() != before;
+            // If primary (slot 0) was removed, promote slot 1 to slot 0
+            if changed && !slots.is_empty() && !slots.iter().any(|r| r.slot == 0) {
+                if let Some(first) = slots.iter_mut().min_by_key(|r| r.slot) {
+                    first.slot = 0;
+                }
+                slots.sort_by_key(|r| r.slot);
+            }
+            // Remove the hostname entirely if no slots remain
+            if slots.is_empty() {
+                drop(entry);
+                self.map.remove(hostname);
+            }
+        }
+        if changed {
+            self.persist_locked()?;
+            self.sync_hosts_locked();
+        }
+        Ok(())
+    }
+
     pub async fn remove_stale(&self) -> Result<Vec<Route>> {
         let _guard = self.write_lock.lock().await;
-        let removed: Vec<Route> = self
-            .map
-            .iter()
-            .filter(|e| !pid_alive_check(e.value().pid))
-            .map(|e| e.value().clone())
-            .collect();
-        if removed.is_empty() {
-            return Ok(Vec::new());
+
+        let mut removed: Vec<Route> = Vec::new();
+        let mut hostnames_to_remove: Vec<String> = Vec::new();
+
+        for mut entry in self.map.iter_mut() {
+            let slots = entry.value_mut();
+            let dead: Vec<Route> = slots
+                .iter()
+                .filter(|r| !pid_alive_check(r.pid))
+                .cloned()
+                .collect();
+            if dead.is_empty() {
+                continue;
+            }
+            slots.retain(|r| pid_alive_check(r.pid));
+            removed.extend(dead);
+            if slots.is_empty() {
+                hostnames_to_remove.push(entry.key().clone());
+            }
         }
-        for route in &removed {
-            self.map.remove(&route.hostname);
+
+        for hostname in &hostnames_to_remove {
+            self.map.remove(hostname);
         }
-        self.persist_locked()?;
-        self.sync_hosts_locked();
+
+        if !removed.is_empty() {
+            self.persist_locked()?;
+            self.sync_hosts_locked();
+        }
         Ok(removed)
     }
 
     // ── Private helpers (called while write_lock is held) ─────────────────
 
     fn persist_locked(&self) -> Result<()> {
-        let routes: Vec<Route> = self.map.iter().map(|e| e.value().clone()).collect();
+        let routes: Vec<Route> = self
+            .map
+            .iter()
+            .flat_map(|e| e.value().clone())
+            .collect();
         let json = serde_json::to_string_pretty(&routes)?;
         let tmp_path = format!("{}.tmp", self.path.display());
         std::fs::write(&tmp_path, &json)?;
@@ -154,8 +242,11 @@ impl StateStore {
             .map
             .iter()
             .filter(|e| {
-                let route = e.value();
-                route.hostname != "_.localhost" && route.protocol == RouteProtocol::Http
+                e.key() != "_.localhost"
+                    && e.value()
+                        .first()
+                        .map(|r| r.protocol == RouteProtocol::Http)
+                        .unwrap_or(false)
             })
             .map(|e| e.key().clone())
             .collect();
@@ -446,6 +537,143 @@ mod tests {
     #[test]
     fn pid_alive_check_returns_true_for_zero_alias_sentinel() {
         assert!(pid_alive_check(0), "pid 0 (alias sentinel) should always be considered alive");
+    }
+
+    #[tokio::test]
+    async fn insert_second_route_auto_assigns_slot() {
+        let temp = TempDir::new().unwrap();
+        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
+
+        let route1 = Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
+        };
+        let mut route2 = route1.clone();
+        route2.port = 4001;
+        route2.slot = 0; // will be auto-assigned to 1
+
+        store.insert(route1).await.unwrap();
+        store.insert(route2).await.unwrap();
+
+        let slots = store.list_slots("myapp.localhost");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].slot, 0);
+        assert_eq!(slots[1].slot, 1);
+        assert_eq!(slots[0].port, 4000);
+        assert_eq!(slots[1].port, 4001);
+    }
+
+    #[tokio::test]
+    async fn get_returns_primary_slot() {
+        let temp = TempDir::new().unwrap();
+        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
+
+        let route = Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
+        };
+        let mut route2 = route.clone();
+        route2.port = 4001;
+
+        store.insert(route).await.unwrap();
+        store.insert(route2).await.unwrap();
+
+        let primary = store.get("myapp.localhost").unwrap();
+        assert_eq!(primary.port, 4000, "get() should return slot 0 (primary)");
+    }
+
+    #[tokio::test]
+    async fn remove_slot_promotes_next() {
+        let temp = TempDir::new().unwrap();
+        let store = StateStore::new(temp.path().join("routes.json")).unwrap();
+
+        let route = Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
+        };
+        let mut route2 = route.clone();
+        route2.port = 4001;
+
+        store.insert(route).await.unwrap();
+        store.insert(route2).await.unwrap();
+
+        // Remove primary (slot 0), slot 1 should become new primary (slot 0)
+        store.remove_slot("myapp.localhost", 0).await.unwrap();
+
+        let slots = store.list_slots("myapp.localhost");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].slot, 0, "remaining slot should be promoted to slot 0");
+        assert_eq!(slots[0].port, 4001);
+    }
+
+    #[tokio::test]
+    async fn multi_slot_persists_and_reloads() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("routes.json");
+
+        {
+            let store = StateStore::new(path.clone()).unwrap();
+            let route = Route {
+                hostname: "myapp.localhost".to_string(),
+                port: 4000,
+                public_port: None,
+                protocol: RouteProtocol::Http,
+                pid: std::process::id(),
+                owner_pid: std::process::id(),
+                cwd: "/tmp".to_string(),
+                created_at: Utc::now(),
+                slot: 0,
+                label: Some("main".to_string()),
+                tailscale_url: None,
+                tailscale_https_port: None,
+                tailscale_funnel: false,
+            };
+            let mut route2 = route.clone();
+            route2.port = 4001;
+            route2.label = Some("dev".to_string());
+
+            store.insert(route).await.unwrap();
+            store.insert(route2).await.unwrap();
+        }
+
+        let store = StateStore::new(path).unwrap();
+        let slots = store.list_slots("myapp.localhost");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].label, Some("main".to_string()));
+        assert_eq!(slots[1].label, Some("dev".to_string()));
     }
 
     #[tokio::test]
