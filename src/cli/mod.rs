@@ -59,6 +59,12 @@ pub enum CliCommand {
         /// Share this app publicly via Tailscale Funnel (implies --tailscale)
         #[arg(long)]
         funnel: bool,
+        /// Register as a specific slot number (default: auto-assign next available)
+        #[arg(long)]
+        slot: Option<u32>,
+        /// Label shown in the app-switcher UI (default: slot-N)
+        #[arg(long)]
+        label: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -246,6 +252,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 false,
                 false,
                 false,
+                None,
+                None,
             )
             .await?;
         }
@@ -524,6 +532,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             h2c,
             tailscale,
             funnel,
+            slot,
+            label,
             args,
         } => {
             let cwd = std::env::current_dir()?;
@@ -545,6 +555,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 force,
                 use_tailscale,
                 funnel,
+                slot,
+                label,
             )
             .await?;
         }
@@ -788,6 +800,8 @@ async fn do_run(
     force: bool,
     tailscale: bool,
     funnel: bool,
+    slot: Option<u32>,
+    label: Option<String>,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -1016,8 +1030,8 @@ async fn do_run(
                 },
                 pid: child_pid,
                 cwd: cwd.to_string_lossy().to_string(),
-                slot: None,
-                label: None,
+                slot,
+                label: label.clone(),
             },
         )
         .await;
@@ -2047,6 +2061,19 @@ mod tests {
         assert!(args.contains(&"tailscale"), "run should have --tailscale");
         assert!(args.contains(&"funnel"), "run should have --funnel");
         assert!(args.contains(&"h2c"), "run should have --h2c");
+    }
+
+    #[test]
+    fn run_command_has_slot_and_label_args() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let run_sub = cmd.find_subcommand("run").expect("run subcommand");
+        let args: Vec<&str> = run_sub
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(args.contains(&"slot"), "run should have --slot");
+        assert!(args.contains(&"label"), "run should have --label");
     }
 
     #[test]
