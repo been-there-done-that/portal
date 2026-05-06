@@ -75,6 +75,11 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }
     }
 
@@ -88,6 +93,11 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }
     }
 

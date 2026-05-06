@@ -28,6 +28,18 @@ pub struct Route {
     pub cwd: String,
     #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
+    // Multiplexed routing
+    #[serde(default)]
+    pub slot: u32,
+    #[serde(default)]
+    pub label: Option<String>,
+    // Tailscale
+    #[serde(default)]
+    pub tailscale_url: Option<String>,
+    #[serde(default)]
+    pub tailscale_https_port: Option<u16>,
+    #[serde(default)]
+    pub tailscale_funnel: bool,
 }
 
 /// Thread-safe store backed by DashMap.
@@ -216,6 +228,11 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
 
         store.insert(route.clone()).await.unwrap();
@@ -241,6 +258,11 @@ mod tests {
                 owner_pid: std::process::id(),
                 cwd: "/tmp".to_string(),
                 created_at: Utc::now(),
+                slot: 0,
+                label: None,
+                tailscale_url: None,
+                tailscale_https_port: None,
+                tailscale_funnel: false,
             };
             store.insert(route).await.unwrap();
         }
@@ -266,6 +288,11 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
 
         store.insert(route).await.unwrap();
@@ -292,6 +319,11 @@ mod tests {
             owner_pid: current_pid,
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
 
         // Insert route with invalid PID
@@ -304,6 +336,11 @@ mod tests {
             owner_pid: u32::MAX,
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
 
         store.insert(route_alive).await.unwrap();
@@ -336,6 +373,11 @@ mod tests {
                 owner_pid: u32::MAX,
                 cwd: "/tmp".to_string(),
                 created_at: Utc::now(),
+                slot: 0,
+                label: None,
+                tailscale_url: None,
+                tailscale_https_port: None,
+                tailscale_funnel: false,
             })
             .await
             .unwrap();
@@ -365,6 +407,11 @@ mod tests {
                     owner_pid: std::process::id(),
                     cwd: "/tmp".to_string(),
                     created_at: chrono::Utc::now(),
+                    slot: 0,
+                    label: None,
+                    tailscale_url: None,
+                    tailscale_https_port: None,
+                    tailscale_funnel: false,
                 })
                 .await
                 .unwrap();
@@ -415,6 +462,11 @@ mod tests {
             owner_pid: 0,
             cwd: String::new(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }).await.unwrap();
 
         store.insert(Route {
@@ -426,6 +478,11 @@ mod tests {
             owner_pid: u32::MAX,
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }).await.unwrap();
 
         let removed = store.remove_stale().await.unwrap();

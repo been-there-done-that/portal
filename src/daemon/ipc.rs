@@ -327,6 +327,11 @@ async fn dispatch(
                 owner_pid: pid,
                 cwd,
                 created_at: chrono::Utc::now(),
+                slot: 0,
+                label: None,
+                tailscale_url: None,
+                tailscale_https_port: None,
+                tailscale_funnel: false,
             };
             match manager.insert(route).await {
                 Ok(_) => {
@@ -458,6 +463,11 @@ mod stale_tests {
             owner_pid: u32::MAX,
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
         routes.insert(route.clone()).await.unwrap();
         tcp_routes.ensure_route(&route).await.unwrap();
@@ -521,6 +531,11 @@ mod tests {
                 owner_pid: std::process::id(),
                 cwd: "/tmp".to_string(),
                 created_at: chrono::Utc::now(),
+                slot: 0,
+                label: None,
+                tailscale_url: None,
+                tailscale_https_port: None,
+                tailscale_funnel: false,
             })
             .await
             .unwrap();
@@ -536,6 +551,11 @@ mod tests {
                 owner_pid: std::process::id(),
                 cwd: String::new(),
                 created_at: chrono::Utc::now(),
+                slot: 0,
+                label: None,
+                tailscale_url: None,
+                tailscale_https_port: None,
+                tailscale_funnel: false,
             })
             .await
             .unwrap();
@@ -557,6 +577,11 @@ mod tests {
             owner_pid: 1,
             cwd: "/tmp".to_string(),
             created_at: chrono::Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
         assert_eq!(
             display_target_for_route(&route, true, 80, 4443),
@@ -575,6 +600,11 @@ mod tests {
             owner_pid: 1,
             cwd: "/tmp".to_string(),
             created_at: chrono::Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         };
         assert_eq!(
             display_target_for_route(&route, true, 80, 443),
@@ -599,6 +629,11 @@ mod tests {
             owner_pid: u32::MAX,
             cwd: "/tmp".to_string(),
             created_at: chrono::Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }).await.unwrap();
 
         // Alias route: pid == 0, must survive prune
@@ -611,6 +646,11 @@ mod tests {
             owner_pid: 0,
             cwd: "/tmp".to_string(),
             created_at: chrono::Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }).await.unwrap();
 
         let response = dispatch(

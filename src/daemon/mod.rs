@@ -222,6 +222,11 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
                             owner_pid: std::process::id(),
                             cwd: String::new(),
                             created_at: chrono::Utc::now(),
+                            slot: 0,
+                            label: None,
+                            tailscale_url: None,
+                            tailscale_https_port: None,
+                            tailscale_funnel: false,
                         })
                         .await;
                     tracing::info!(
