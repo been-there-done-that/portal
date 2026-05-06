@@ -333,7 +333,7 @@ pub async fn handle_https_request(
 
     let hostname = {
         let from_host = extract_host(req.headers().get(http::header::HOST));
-        if routes.get(&from_host).is_some() {
+        if !routes.list_slots(&from_host).is_empty() {
             from_host
         } else {
             // Fallback: reverse proxies (ngrok, Cloudflare Tunnel) pass the original
@@ -365,29 +365,50 @@ pub async fn handle_https_request(
         });
     }
 
-    let route = match routes.get(&hostname).or_else(|| {
-        if wildcard {
-            wildcard_parent(&hostname).and_then(|parent| routes.get(&parent))
+    // Slot-aware route lookup
+    let slots = {
+        let direct = routes.list_slots(&hostname);
+        if !direct.is_empty() {
+            direct
+        } else if wildcard {
+            wildcard_parent(&hostname)
+                .map(|parent| routes.list_slots(&parent))
+                .unwrap_or_default()
         } else {
-            None
-        }
-    }) {
-        Some(r) => r,
-        None => {
-            return Ok(if accept_html {
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header("content-type", "text/html")
-                    .body(full_body(crate::pages::page_404(&hostname)))
-                    .unwrap()
-            } else {
-                plain_error(
-                    StatusCode::NOT_FOUND,
-                    &format!("no route registered for {hostname}"),
-                )
-            });
+            vec![]
         }
     };
+
+    if slots.is_empty() {
+        return Ok(if accept_html {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("content-type", "text/html")
+                .body(full_body(crate::pages::page_404(&hostname)))
+                .unwrap()
+        } else {
+            plain_error(
+                StatusCode::NOT_FOUND,
+                &format!("no route registered for {hostname}"),
+            )
+        });
+    }
+
+    let route = if slots.len() == 1 {
+        slots[0].clone()
+    } else {
+        let cookie_header = req
+            .headers()
+            .get(http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let preferred = crate::switcher::read_slot_from_cookies(cookie_header, &hostname);
+        let primary = slots[0].clone();
+        slots.iter().find(|r| r.slot == preferred).cloned().unwrap_or(primary)
+    };
+
+    // Keep all slots for switcher injection
+    let slots_for_injection = slots;
 
     if is_websocket_upgrade(&req) || is_h2_websocket_connect(&req) {
         // WebSocket upgrade errors are always plain-text — they bypass the accept_html branch
@@ -542,6 +563,26 @@ pub async fn handle_https_request(
                 let resp_bytes = match resp_body.collect().await {
                     Ok(c) => c.to_bytes(),
                     Err(_) => bytes::Bytes::new(),
+                };
+
+                // Inject app-switcher for multi-slot hostnames into text/html responses
+                let resp_bytes = if slots_for_injection.len() > 1 {
+                    let ct = resp_parts
+                        .headers
+                        .get(http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    crate::switcher::inject_switcher(
+                        &resp_bytes,
+                        ct,
+                        &hostname,
+                        &slots_for_injection,
+                        route.slot,
+                    )
+                    .map(|injected| bytes::Bytes::from(injected))
+                    .unwrap_or(resp_bytes)
+                } else {
+                    resp_bytes
                 };
 
                 if let Some(sender) = &inspector {
@@ -979,6 +1020,16 @@ mod tests {
             .body(())
             .unwrap();
         assert!(!is_h2_websocket_connect(&req3), "H1 websocket should not match H2 function");
+    }
+
+    #[test]
+    fn switcher_read_slot_from_cookies_integration() {
+        let cookie = "portless-slot-myapp-localhost=1";
+        let slot = crate::switcher::read_slot_from_cookies(cookie, "myapp.localhost");
+        assert_eq!(slot, 1, "should select slot 1 from cookie");
+
+        let slot_default = crate::switcher::read_slot_from_cookies("", "myapp.localhost");
+        assert_eq!(slot_default, 0, "should default to slot 0 when no cookie");
     }
 
     #[test]
