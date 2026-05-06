@@ -32,6 +32,10 @@ impl CertStore {
     }
 
     /// Generate the local CA certificate and key if not already present (idempotent).
+    ///
+    /// If mkcert is installed and its CA is already trusted by the OS, portal
+    /// borrows mkcert's CA so all dynamically generated host certs are signed by
+    /// a CA that browsers already trust — no admin password required.
     pub fn ensure_ca(&self) -> Result<()> {
         let ca_pem_path = self.dir.join("ca.pem");
         let ca_key_path = self.dir.join("ca-key.pem");
@@ -40,11 +44,28 @@ impl CertStore {
             return Ok(());
         }
 
-        // Generate key pair
+        // Prefer mkcert's CA when available: it is already trusted by the OS
+        // (mkcert -install was run previously) so no extra trust step is needed.
+        if let Some(mkcert_dir) = mkcert_caroot() {
+            let src_cert = mkcert_dir.join("rootCA.pem");
+            let src_key = mkcert_dir.join("rootCA-key.pem");
+            if src_cert.exists() && src_key.exists() {
+                std::fs::copy(&src_cert, &ca_pem_path)?;
+                std::fs::copy(&src_key, &ca_key_path)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&ca_key_path, std::fs::Permissions::from_mode(0o600))?;
+                }
+                tracing::info!("Using mkcert CA (already trusted by OS)");
+                return Ok(());
+            }
+        }
+
+        // Fallback: generate portal's own self-signed CA.
         let key_pair = KeyPair::generate()
             .map_err(|e| Error::Cert(format!("CA key generation failed: {e}")))?;
 
-        // Build certificate params
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
@@ -53,7 +74,6 @@ impl CertStore {
             .distinguished_name
             .push(DnType::CommonName, "Portal Local CA");
 
-        // Self-sign
         let cert = params
             .self_signed(&key_pair)
             .map_err(|e| Error::Cert(format!("CA self-sign failed: {e}")))?;
@@ -89,17 +109,18 @@ impl CertStore {
         let safe = safe_hostname(hostname);
         let cert_path = self.dir.join("hosts").join(format!("{safe}.pem"));
         let key_path = self.dir.join("hosts").join(format!("{safe}-key.pem"));
+        let ca_pem_bytes = self.ca_pem()?;
 
         // 2. Disk cache hit
         if cert_path.exists() && key_path.exists() {
-            let ck = load_certified_key(&cert_path, &key_path)?;
+            let ck = load_certified_key_with_ca(&cert_path, &key_path, &ca_pem_bytes)?;
             let ck = Arc::new(ck);
             self.cache.insert(hostname.to_string(), Arc::clone(&ck));
             return Ok(ck);
         }
 
         // 3. Generate new host cert signed by CA
-        let ca_pem = String::from_utf8(self.ca_pem()?)
+        let ca_pem = String::from_utf8(ca_pem_bytes.clone())
             .map_err(|_| Error::Cert("CA PEM is not valid UTF-8".into()))?;
         let ca_key_pem = std::fs::read_to_string(self.dir.join("ca-key.pem"))?;
 
@@ -124,6 +145,10 @@ impl CertStore {
         host_params
             .distinguished_name
             .push(DnType::CommonName, hostname);
+        // AKI is required by RFC 5280 and enforced by Chrome/Safari/modern validators.
+        // EKU serverAuth tells TLS clients this cert is valid for HTTPS.
+        host_params.use_authority_key_identifier_extension = true;
+        host_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
 
         let host_cert = host_params
             .signed_by(&host_key, &ca_cert, &ca_key_pair)
@@ -137,7 +162,7 @@ impl CertStore {
             std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
-        let ck = Arc::new(load_certified_key(&cert_path, &key_path)?);
+        let ck = Arc::new(load_certified_key_with_ca(&cert_path, &key_path, &ca_pem_bytes)?);
         self.cache.insert(hostname.to_string(), Arc::clone(&ck));
         Ok(ck)
     }
@@ -158,15 +183,24 @@ impl CertStore {
 #[cfg(target_os = "macos")]
 pub fn is_ca_trusted() -> bool {
     use std::process::Command;
+    let ca_path = crate::config::dirs_for_state().join("certs").join("ca.pem");
+    if !ca_path.exists() {
+        return false;
+    }
+    // verify-cert checks all keychains (system + user login) for trust.
     Command::new("security")
         .args([
-            "find-certificate",
+            "verify-cert",
             "-c",
-            "Portal Local CA",
-            "/Library/Keychains/System.keychain",
+            ca_path.to_str().unwrap_or(""),
+            "-L",
+            "-p",
+            "ssl",
         ])
-        .output()
-        .map(|o| o.status.success())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
 }
 
@@ -188,16 +222,47 @@ fn safe_hostname(hostname: &str) -> String {
     hostname.replace('.', "_").replace('*', "wildcard")
 }
 
+/// Return the mkcert CA root directory if mkcert is installed.
+fn mkcert_caroot() -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("mkcert")
+        .arg("-CAROOT")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    Some(std::path::PathBuf::from(path.trim()))
+}
+
 fn load_certified_key(
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
 ) -> Result<CertifiedKey> {
-    // Load cert chain
+    load_certified_key_with_ca(cert_path, key_path, &[])
+}
+
+/// Like `load_certified_key` but appends the CA cert to the chain so clients
+/// receive the full leaf → CA chain during the TLS handshake.
+fn load_certified_key_with_ca(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    ca_pem: &[u8],
+) -> Result<CertifiedKey> {
+    // Load leaf cert
     let cert_pem = std::fs::read(cert_path)?;
-    let certs: Vec<CertificateDer<'static>> = {
+    let mut certs: Vec<CertificateDer<'static>> = {
         let mut reader = BufReader::new(cert_pem.as_slice());
         rustls_pemfile::certs(&mut reader).collect::<std::io::Result<Vec<_>>>()?
     };
+
+    // Append CA cert so the full chain is sent during TLS handshake
+    if !ca_pem.is_empty() {
+        let mut reader = BufReader::new(ca_pem);
+        let ca_certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut reader).collect::<std::io::Result<Vec<_>>>()?;
+        certs.extend(ca_certs);
+    }
 
     // Load private key
     let key_pem = std::fs::read(key_path)?;
@@ -221,26 +286,72 @@ fn load_certified_key(
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
+fn login_keychain_path() -> String {
+    use std::process::Command;
+    // `security default-keychain` prints e.g. `    "/Users/foo/Library/Keychains/login.keychain-db"`
+    if let Ok(out) = Command::new("security")
+        .args(["default-keychain"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let clean = text.trim().trim_matches('"');
+        if !clean.is_empty() {
+            return clean.to_string();
+        }
+    }
+    // Fallback: conventional path
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/Library/Keychains/login.keychain-db")
+}
+
+#[cfg(target_os = "macos")]
 fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
     use std::process::Command;
-    let status = Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-d",
-            "-r",
-            "trustRoot",
-            "-k",
-            "/Library/Keychains/System.keychain",
-            ca_path
-                .to_str()
-                .ok_or_else(|| Error::Cert("invalid CA path".into()))?,
-        ])
-        .status()?;
-    if !status.success() {
-        return Err(Error::Cert(format!(
-            "security add-trusted-cert failed with exit code {:?}",
-            status.code()
-        )));
+
+    let ca_str = ca_path
+        .to_str()
+        .ok_or_else(|| Error::Cert("invalid CA path".into()))?;
+
+    let is_root = unsafe { nix::libc::geteuid() } == 0;
+    if is_root {
+        // Root: write directly to System.keychain.
+        let status = Command::new("security")
+            .args([
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Library/Keychains/System.keychain",
+                ca_str,
+            ])
+            .status()?;
+        if !status.success() {
+            return Err(Error::Cert(format!(
+                "security add-trusted-cert failed with exit code {:?}",
+                status.code()
+            )));
+        }
+    } else {
+        // Non-root: add to the user's login keychain. No sudo required.
+        // macOS marks it as a trusted root for all policies in the user trust store.
+        let keychain = login_keychain_path();
+        let status = Command::new("security")
+            .args([
+                "add-trusted-cert",
+                "-r",
+                "trustRoot",
+                "-k",
+                keychain.as_str(),
+                ca_str,
+            ])
+            .status()?;
+        if !status.success() {
+            return Err(Error::Cert(format!(
+                "security add-trusted-cert failed with exit code {:?}",
+                status.code()
+            )));
+        }
     }
     Ok(())
 }
@@ -248,6 +359,31 @@ fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn install_system_trust_impl(ca_path: &std::path::Path) -> Result<()> {
     use std::process::Command;
+
+    let is_root = unsafe { nix::libc::geteuid() } == 0;
+    if !is_root {
+        let has_tty = unsafe { nix::libc::isatty(0) } == 1;
+        if !has_tty {
+            return Err(Error::Cert(
+                "installing the CA requires admin privileges; run: sudo portal cert install".into(),
+            ));
+        }
+        let status = Command::new("sudo")
+            .args([
+                "portal",
+                "cert",
+                "install",
+            ])
+            .status()?;
+        if !status.success() {
+            return Err(Error::Cert(format!(
+                "sudo portal cert install failed with exit code {:?}",
+                status.code()
+            )));
+        }
+        return Ok(());
+    }
+
     let dest = std::path::Path::new("/usr/local/share/ca-certificates/portal-ca.crt");
     std::fs::copy(ca_path, dest)?;
     let status = Command::new("update-ca-certificates").status()?;

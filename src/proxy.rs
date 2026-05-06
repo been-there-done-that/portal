@@ -332,9 +332,21 @@ pub async fn handle_https_request(
         .unwrap_or(0);
 
     let hostname = {
+        // HTTP/2 puts the host in :authority (→ req.uri().authority()), not the Host header.
+        // HTTP/1.1 uses the Host header. Check both so routes work for either version.
         let from_host = extract_host(req.headers().get(http::header::HOST));
-        if !routes.list_slots(&from_host).is_empty() {
+        let from_authority = req
+            .uri()
+            .authority()
+            .map(|a| a.host().to_string())
+            .unwrap_or_default();
+        let effective_host = if !from_host.is_empty() {
             from_host
+        } else {
+            from_authority
+        };
+        if !routes.list_slots(&effective_host).is_empty() {
+            effective_host
         } else {
             // Fallback: reverse proxies (ngrok, Cloudflare Tunnel) pass the original
             // hostname in X-Forwarded-Host when they rewrite the Host header.
@@ -342,7 +354,7 @@ pub async fn handle_https_request(
             if !forwarded.is_empty() {
                 forwarded
             } else {
-                from_host
+                effective_host
             }
         }
     };
@@ -465,6 +477,9 @@ pub async fn handle_https_request(
                 .unwrap());
         }
     };
+    // Upstream is always HTTP/1.1 — hyper's client errors if the request version
+    // says HTTP/2.0 but the connection is HTTP/1.1.
+    parts.version = http::Version::HTTP_11;
     parts
         .headers
         .insert(HOP_HEADER, (hops + 1).to_string().parse().unwrap());

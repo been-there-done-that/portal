@@ -9,7 +9,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 ///   https://myapp.localhost
 ///   └─ localhost:4123  ·  cert ✓  ·  pid 91842
 /// ```
-pub fn print_banner(public_url: &str, port: u16, pid: u32, replaced: bool) {
+pub fn print_banner(public_url: &str, port: u16, pid: u32, replaced: bool, cert_trusted: bool) {
     let version = env!("CARGO_PKG_VERSION");
     let badge = style(" portal ").bold().white().on_blue();
     let ver = style(format!("v{version}")).dim();
@@ -18,6 +18,11 @@ pub fn print_banner(public_url: &str, port: u16, pid: u32, replaced: bool) {
     } else {
         style("● running").green().to_string()
     };
+    let cert_indicator = if cert_trusted {
+        style("cert ✓").green().to_string()
+    } else {
+        style("cert ✗ (run: portal cert install)").yellow().to_string()
+    };
     eprintln!("  {badge}  {ver}  ·  {status_dot}");
     eprintln!();
     eprintln!("  {}", style(public_url).bold().white());
@@ -25,7 +30,7 @@ pub fn print_banner(public_url: &str, port: u16, pid: u32, replaced: bool) {
         "  {}{}  ·  {}  ·  {}",
         style("└─ localhost:").dim(),
         style(port.to_string()).red(),
-        style("cert ✓").green(),
+        cert_indicator,
         style(format!("pid {pid}")).dim(),
     );
 }

@@ -31,9 +31,9 @@ impl DaemonMode {
 ///   run the daemon loop directly.
 /// - Otherwise, check if privileged ports need sudo, escalate if necessary,
 ///   then spawn a fresh copy of the binary with PORTAL_IS_DAEMON=1 and exit.
-pub async fn start(mode: DaemonMode) -> Result<()> {
+pub async fn start(mode: DaemonMode, http_port: Option<u16>, https_port: Option<u16>) -> Result<()> {
     if std::env::var("PORTAL_IS_DAEMON").as_deref() == Ok("1") {
-        run_daemon_loop(mode).await
+        run_daemon_loop(mode, http_port, https_port).await
     } else {
         let state_dir = dirs_for_state();
         std::fs::create_dir_all(&state_dir)?;
@@ -45,7 +45,11 @@ pub async fn start(mode: DaemonMode) -> Result<()> {
         }
 
         let cwd = std::env::current_dir().unwrap_or_default();
-        let config = Config::load(&cwd)?;
+        let mut config = Config::load(&cwd)?;
+        if let Some(p) = http_port { config.proxy.http_port = p; }
+        if let Some(p) = https_port { config.proxy.https_port = p; }
+
+        let port_args = port_override_args(config.proxy.http_port, config.proxy.https_port);
 
         let needs_sudo = matches!(mode, DaemonMode::Full)
             && !cfg!(windows)
@@ -70,6 +74,7 @@ pub async fn start(mode: DaemonMode) -> Result<()> {
                 .arg(&exe)
                 .arg("daemon")
                 .args(mode.daemon_args())
+                .args(&port_args)
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::inherit())
@@ -86,6 +91,7 @@ pub async fn start(mode: DaemonMode) -> Result<()> {
         let mut cmd = tokio::process::Command::new(exe);
         cmd.arg("daemon")
             .args(mode.daemon_args())
+            .args(&port_args)
             .env("PORTAL_IS_DAEMON", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -101,6 +107,20 @@ pub async fn start(mode: DaemonMode) -> Result<()> {
     }
 }
 
+/// Build `--http-port N --https-port N` args when ports differ from protocol defaults.
+pub(crate) fn port_override_args(http_port: u16, https_port: u16) -> Vec<String> {
+    let mut args = Vec::new();
+    if http_port != 80 {
+        args.push("--http-port".to_string());
+        args.push(http_port.to_string());
+    }
+    if https_port != 443 {
+        args.push("--https-port".to_string());
+        args.push(https_port.to_string());
+    }
+    args
+}
+
 impl DaemonMode {
     pub(crate) fn daemon_args(self) -> &'static [&'static str] {
         match self {
@@ -110,7 +130,7 @@ impl DaemonMode {
     }
 }
 
-async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
+async fn run_daemon_loop(mode: DaemonMode, http_port_override: Option<u16>, https_port_override: Option<u16>) -> Result<()> {
     let state_dir = dirs_for_state();
     std::fs::create_dir_all(&state_dir)?;
     std::fs::create_dir_all(state_dir.join("logs"))?;
@@ -171,8 +191,10 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
     // Write our PID
     daemonize::write_pid_file(&pid_path, std::process::id())?;
 
-    // Load config
-    let config = Config::load(&std::env::current_dir().unwrap_or_default())?;
+    // Load config, then apply any port overrides passed via CLI args.
+    let mut config = Config::load(&std::env::current_dir().unwrap_or_default())?;
+    if let Some(p) = http_port_override { config.proxy.http_port = p; }
+    if let Some(p) = https_port_override { config.proxy.https_port = p; }
 
     // Init route store and manager
     let store = match StateStore::new(state_dir.join("routes.json")) {
