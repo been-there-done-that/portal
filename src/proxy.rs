@@ -318,6 +318,7 @@ pub async fn handle_https_request(
     routes: crate::routes::StateStore,
     inspector: Option<crate::inspector::InspectorSender>,
     wildcard: bool,
+    h2c: bool,
 ) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
     let start = std::time::Instant::now();
 
@@ -450,10 +451,21 @@ pub async fn handle_https_request(
         .headers
         .insert("x-forwarded-proto", "https".parse().unwrap());
 
-    // Reuse a shared HTTP client for connection pooling and keep-alive
+    // Reuse a shared HTTP client for connection pooling and keep-alive.
     static HTTP_CLIENT: std::sync::OnceLock<Client<HttpConnector, BoxBodyType>> =
         std::sync::OnceLock::new();
-    let client = HTTP_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http());
+    static H2C_CLIENT: std::sync::OnceLock<Client<HttpConnector, BoxBodyType>> =
+        std::sync::OnceLock::new();
+
+    let client = if h2c {
+        H2C_CLIENT.get_or_init(|| {
+            Client::builder(TokioExecutor::new())
+                .http2_only(true)
+                .build_http()
+        })
+    } else {
+        HTTP_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+    };
     let upstream_req = Request::from_parts(parts, full_body(req_body_bytes.clone()));
 
     match client.request(upstream_req).await {

@@ -13,6 +13,8 @@ pub struct ProxyConfig {
     pub wildcard: bool,
     pub lan: bool,
     pub lan_ip: Option<String>,
+    #[serde(default)]
+    pub h2c: bool,
 }
 
 impl Default for ProxyConfig {
@@ -26,6 +28,7 @@ impl Default for ProxyConfig {
             wildcard: false,
             lan: false,
             lan_ip: None,
+            h2c: false,
         }
     }
 }
@@ -113,6 +116,7 @@ struct PartialProxyConfig {
     wildcard: Option<bool>,
     lan: Option<bool>,
     lan_ip: Option<String>,
+    h2c: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -208,6 +212,9 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     if let Some(lan_ip) = partial.proxy.lan_ip {
         config.proxy.lan_ip = Some(lan_ip);
     }
+    if let Some(h2c) = partial.proxy.h2c {
+        config.proxy.h2c = h2c;
+    }
 
     if let Some(log_level) = partial.daemon.log_level {
         config.daemon.log_level = log_level;
@@ -265,6 +272,7 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
             "PORTLESS_WILDCARD" => config.proxy.wildcard = matches!(*value, "1" | "true" | "yes" | "on"),
             "PORTLESS_LAN" => config.proxy.lan = matches!(*value, "1" | "true" | "yes" | "on"),
             "PORTLESS_LAN_IP" => config.proxy.lan_ip = Some(value.to_string()),
+            "PORTLESS_H2C" => config.proxy.h2c = matches!(*value, "1" | "true" | "yes" | "on"),
             _ => {
                 // Ignore unknown env vars
             }
@@ -515,5 +523,18 @@ port_env = "APP_PORT"
         let config = Config::load_with_paths(None, None, &[]).unwrap();
         // When None, caller should default to "PORT"
         assert_eq!(config.project.port_env.as_deref().unwrap_or("PORT"), "PORT");
+    }
+
+    #[test]
+    fn h2c_config_defaults_to_false() {
+        let config = Config::load_with_paths(None, None, &[]).unwrap();
+        assert!(!config.proxy.h2c, "h2c should default to false");
+    }
+
+    #[test]
+    fn h2c_env_var_sets_h2c() {
+        let env = [("PORTLESS_H2C", "1")];
+        let config = Config::load_with_paths(None, None, &env).unwrap();
+        assert!(config.proxy.h2c);
     }
 }

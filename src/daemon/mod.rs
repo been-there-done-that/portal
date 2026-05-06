@@ -411,7 +411,7 @@ async fn serve_https(
                         hyper::service::service_fn(move |req| {
                             let r = routes.clone();
                             let insp = inspector.clone();
-                            async move { crate::proxy::handle_https_request(req, r, insp, wc).await }
+                            async move { crate::proxy::handle_https_request(req, r, insp, wc, false).await }
                         }),
                     )
                     .await

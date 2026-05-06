@@ -50,6 +50,9 @@ pub enum CliCommand {
         /// Override the auto-detected LAN IP (e.g. for VPN setups)
         #[arg(long, value_name = "ADDR")]
         ip: Option<String>,
+        /// Use HTTP/2 cleartext (h2c) for upstream connections (for gRPC backends)
+        #[arg(long)]
+        h2c: bool,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -510,12 +513,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             force,
             lan,
             ip,
+            h2c,
             args,
         } => {
             let cwd = std::env::current_dir()?;
             let mut config = crate::config::Config::load(&cwd)?;
             if lan { config.proxy.lan = true; }
             if let Some(addr) = ip { config.proxy.lan_ip = Some(addr); }
+            if h2c { config.proxy.h2c = true; }
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
             do_run(
                 cwd,
