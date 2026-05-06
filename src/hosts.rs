@@ -148,7 +148,7 @@ pub fn sync_hosts_file(hostnames: &[&str]) -> crate::error::Result<()> {
             if is_perm {
                 // Non-root daemon: attempt non-interactive sudo tee.
                 // Succeeds silently when sudo credentials are cached; fails silently otherwise.
-                if !sync_via_sudo_tee(hostnames, &path) {
+                if !sync_via_sudo_tee(hostnames, &path, true) {
                     return Err(e);
                 }
             } else {
@@ -165,10 +165,41 @@ pub fn sync_hosts_file(hostnames: &[&str]) -> crate::error::Result<()> {
     Ok(())
 }
 
-/// Write the hosts block via `sudo -n tee /etc/hosts` (non-interactive).
-/// Returns true if the write succeeded (credentials were cached), false otherwise.
+/// Like `sync_hosts_file` but uses interactive `sudo tee` (with password prompt) as the
+/// fallback instead of the non-interactive `-n` variant. Call this from CLI context where
+/// a TTY is available; the daemon (no TTY) should use `sync_hosts_file` instead.
+pub fn sync_hosts_file_interactive(hostnames: &[&str]) -> crate::error::Result<()> {
+    let path = hosts_path();
+    if let Err(e) = sync_hosts_file_at(hostnames, &path) {
+        #[cfg(unix)]
+        {
+            use std::io::ErrorKind;
+            let is_perm = matches!(
+                &e,
+                crate::error::Error::Io(io) if io.kind() == ErrorKind::PermissionDenied
+            );
+            if is_perm {
+                if !sync_via_sudo_tee(hostnames, &path, false) {
+                    return Err(e);
+                }
+            } else {
+                return Err(e);
+            }
+        }
+        #[cfg(not(unix))]
+        return Err(e);
+    }
+    #[cfg(target_os = "macos")]
+    flush_dns_cache();
+    Ok(())
+}
+
+/// Write the hosts block via `sudo [-n] tee /etc/hosts`.
+/// `non_interactive=true` uses `-n` (silent, requires cached creds — safe from daemon).
+/// `non_interactive=false` prompts for password via TTY — call only from CLI context.
+/// Returns true if the write succeeded.
 #[cfg(unix)]
-fn sync_via_sudo_tee(hostnames: &[&str], path: &std::path::Path) -> bool {
+fn sync_via_sudo_tee(hostnames: &[&str], path: &std::path::Path, non_interactive: bool) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -183,9 +214,13 @@ fn sync_via_sudo_tee(hostnames: &[&str], path: &std::path::Path) -> bool {
         }
     };
 
-    let mut child = match Command::new("sudo")
-        .args(["-n", "tee"])
-        .arg(path)
+    let mut cmd = Command::new("sudo");
+    if non_interactive {
+        cmd.arg("-n");
+    }
+    cmd.arg("tee").arg(path);
+
+    let mut child = match cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

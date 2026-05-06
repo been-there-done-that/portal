@@ -637,14 +637,21 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         CliCommand::Inspect => {
-            let url = "https://_.logs";
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let config = crate::config::Config::load(&cwd).unwrap_or_default();
+            let port = config.proxy.https_port;
+            let url = if port == 443 {
+                "https://_.logs".to_string()
+            } else {
+                format!("https://_.logs:{port}")
+            };
             #[cfg(target_os = "macos")]
             {
-                std::process::Command::new("open").arg(url).spawn().ok();
+                std::process::Command::new("open").arg(&url).spawn().ok();
             }
             #[cfg(target_os = "linux")]
             {
-                std::process::Command::new("xdg-open").arg(url).spawn().ok();
+                std::process::Command::new("xdg-open").arg(&url).spawn().ok();
             }
             println!("Opening {url}");
         }
@@ -1143,6 +1150,9 @@ async fn do_run(
                     .unwrap_or_else(|| "failed to register route".to_string()),
             ));
         }
+        // Sync /etc/hosts from CLI (has TTY) — daemon may be non-root and unable to write it.
+        let sock = crate::config::dirs_for_state().join("portal.sock");
+        cli_sync_hosts(&sock).await;
     }
 
     if !quiet {
@@ -1505,6 +1515,8 @@ async fn ensure_daemon_running(
                 config.proxy.http_port,
                 config.proxy.https_port,
             ));
+            // Non-sudo daemon can't write /etc/hosts — sync from CLI which has a TTY.
+            cli_sync_hosts(&sock).await;
             return Ok(());
         }
     }
@@ -1517,6 +1529,41 @@ async fn ensure_daemon_running(
         console::style("✗").red()
     ));
     Err(crate::error::Error::DaemonNotRunning)
+}
+
+/// Sync /etc/hosts from the CLI process (which has a TTY).
+/// Fetches all HTTP routes from the daemon, adds _.logs, then writes with interactive
+/// sudo fallback so the user is prompted if needed. No-op if PORTAL_SYNC_HOSTS is off.
+async fn cli_sync_hosts(sock: &std::path::Path) {
+    if !crate::hosts::should_sync() {
+        return;
+    }
+    // Always include the inspector hostname.
+    let mut hostnames: Vec<String> = vec!["_.logs".to_string()];
+
+    // Fetch user routes from the daemon.
+    if let Ok(mut stream) = tokio::net::UnixStream::connect(sock).await {
+        let _ = write_frame(&mut stream, &Command::Ls).await;
+        if let Ok(resp) = read_frame::<_, crate::proto::Response>(&mut stream).await {
+            if let Some(arr) = resp.data.as_ref().and_then(|v| v.as_array()) {
+                for route in arr {
+                    if let (Some(h), Some("http")) = (
+                        route.get("hostname").and_then(|v| v.as_str()),
+                        route.get("protocol").and_then(|v| v.as_str()),
+                    ) {
+                        if !hostnames.contains(&h.to_string()) {
+                            hostnames.push(h.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let refs: Vec<&str> = hostnames.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = crate::hosts::sync_hosts_file_interactive(&refs) {
+        tracing::warn!("cli hosts sync failed: {e}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
