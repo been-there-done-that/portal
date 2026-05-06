@@ -85,6 +85,9 @@ pub struct ProjectConfig {
     pub port_env: Option<String>,
     /// Whether to proxy this service (None = auto-detect, Some(false) = build-only mode, Some(true) = force proxy)
     pub proxy: Option<bool>,
+    /// npm/yarn/pnpm script to run (equivalent of `--script` CLI flag)
+    #[serde(default)]
+    pub script: Option<String>,
 }
 
 /// Complete configuration
@@ -134,6 +137,23 @@ struct PartialProjectConfig {
     port_position: Option<String>,
     port_env: Option<String>,
     proxy: Option<bool>,
+    script: Option<String>,
+}
+
+/// Flat JSON shape for `package.json["portless"]`
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, rename_all = "snake_case")]
+struct PartialPortlessJson {
+    tld: Option<String>,
+    /// Maps to `ProjectConfig.name`
+    hostname: Option<String>,
+    https: Option<bool>,
+    http_port: Option<u16>,
+    https_port: Option<u16>,
+    wildcard: Option<bool>,
+    lan: Option<bool>,
+    script: Option<String>,
+    h2c: Option<bool>,
 }
 
 impl Config {
@@ -142,7 +162,6 @@ impl Config {
         let global_path = dirs::home_dir().map(|h| h.join(".portal/config.toml"));
         let project_path = find_project_toml(cwd);
 
-        // Collect owned strings first, then borrow for the call
         let env_vars: Vec<(String, String)> = std::env::vars()
             .filter(|(k, _)| k.starts_with("PORTAL_"))
             .collect();
@@ -150,7 +169,19 @@ impl Config {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        Self::load_with_paths(global_path, project_path, &env_refs)
+
+        let mut config = Self::load_with_paths(global_path, project_path.clone(), &env_refs)?;
+
+        // If no portal.toml was found in the upward walk, try package.json["portless"]
+        if project_path.is_none() {
+            if let Some(partial) = find_and_load_package_json_config(cwd) {
+                apply_partial(&mut config, partial);
+                // Re-apply env overrides so they still win over package.json
+                apply_env_overrides(&mut config, &env_refs)?;
+            }
+        }
+
+        Ok(config)
     }
 
     /// Load configuration with explicit paths (used in tests)
@@ -171,13 +202,16 @@ impl Config {
         }
 
         // Layer 2: Load project config (overrides global)
-        if let Some(path) = project_path {
+        let mut toml_found = false;
+        if let Some(ref path) = project_path {
             if path.exists() {
-                let contents = std::fs::read_to_string(&path)?;
+                let contents = std::fs::read_to_string(path)?;
                 let partial: PartialConfig = toml::from_str(&contents)?;
                 apply_partial(&mut config, partial);
+                toml_found = true;
             }
         }
+        let _ = toml_found; // used by Config::load; suppress unused warning in load_with_paths
 
         // Layer 3: Apply env var overrides
         apply_env_overrides(&mut config, env_overrides)?;
@@ -243,6 +277,9 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     }
     if partial.project.proxy.is_some() {
         config.project.proxy = partial.project.proxy;
+    }
+    if partial.project.script.is_some() {
+        config.project.script = partial.project.script;
     }
 }
 
@@ -333,6 +370,55 @@ pub fn sudo_uid_gid() -> Option<(u32, u32)> {
     let uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
     let gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
     Some((uid, gid))
+}
+
+/// Read `package.json` in `dir`, extract `["portless"]`, deserialize to `PartialConfig`.
+/// Returns `None` if the file is absent, the key is missing, or parsing fails.
+fn load_partial_from_package_json(dir: &Path) -> Option<PartialConfig> {
+    let contents = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let portless_val = json.get("portless")?.clone();
+
+    let portless: PartialPortlessJson =
+        serde_json::from_value(portless_val)
+            .map_err(|e| {
+                tracing::debug!(
+                    "package.json[\"portless\"] deserialization failed (ignored): {e}"
+                );
+                e
+            })
+            .ok()?;
+
+    Some(PartialConfig {
+        proxy: PartialProxyConfig {
+            tld: portless.tld,
+            https: portless.https,
+            http_port: portless.http_port,
+            https_port: portless.https_port,
+            wildcard: portless.wildcard,
+            lan: portless.lan,
+            h2c: portless.h2c,
+            ..Default::default()
+        },
+        daemon: PartialDaemonConfig::default(),
+        project: PartialProjectConfig {
+            name: portless.hostname,
+            script: portless.script,
+            ..Default::default()
+        },
+    })
+}
+
+/// Walk upward from `cwd` looking for a `package.json` that contains a
+/// `"portless"` key. Returns `Some(PartialConfig)` for the first match.
+fn find_and_load_package_json_config(cwd: &Path) -> Option<PartialConfig> {
+    let mut current = cwd;
+    loop {
+        if let Some(partial) = load_partial_from_package_json(current) {
+            return Some(partial);
+        }
+        current = current.parent()?;
+    }
 }
 
 #[cfg(test)]
@@ -536,5 +622,104 @@ port_env = "APP_PORT"
         let env = [("PORTLESS_H2C", "1")];
         let config = Config::load_with_paths(None, None, &env).unwrap();
         assert!(config.proxy.h2c);
+    }
+
+    // ── package.json["portless"] tests ────────────────────────────────────────
+
+    #[test]
+    fn portless_key_in_package_json_sets_tld() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"myapp","portless":{"tld":"test"}}"#,
+        )
+        .unwrap();
+        let partial = load_partial_from_package_json(temp.path()).unwrap();
+        let mut cfg = Config::default();
+        apply_partial(&mut cfg, partial);
+        assert_eq!(cfg.proxy.tld, "test");
+    }
+
+    #[test]
+    fn portless_key_sets_hostname() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"portless":{"hostname":"myapi"}}"#,
+        )
+        .unwrap();
+        let partial = load_partial_from_package_json(temp.path()).unwrap();
+        let mut cfg = Config::default();
+        apply_partial(&mut cfg, partial);
+        assert_eq!(cfg.project.name, Some("myapi".to_string()));
+    }
+
+    #[test]
+    fn portal_toml_wins_over_package_json() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"portless":{"tld":"from-json"}}"#,
+        )
+        .unwrap();
+        let toml_path = temp.path().join("portal.toml");
+        std::fs::write(&toml_path, "[proxy]\ntld = \"from-toml\"\n").unwrap();
+        let config = Config::load_with_paths(None, Some(toml_path), &[]).unwrap();
+        assert_eq!(config.proxy.tld, "from-toml");
+    }
+
+    #[test]
+    fn portless_key_missing_uses_defaults() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"myapp","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let result = load_partial_from_package_json(temp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn malformed_portless_key_ignored() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"portless":"not-an-object"}"#,
+        )
+        .unwrap();
+        let result = load_partial_from_package_json(temp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn portless_key_script_override() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"portless":{"script":"start"}}"#,
+        )
+        .unwrap();
+        let partial = load_partial_from_package_json(temp.path()).unwrap();
+        let mut cfg = Config::default();
+        apply_partial(&mut cfg, partial);
+        assert_eq!(cfg.project.script, Some("start".to_string()));
+    }
+
+    #[test]
+    fn find_and_load_package_json_config_walks_upward() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"portless":{"tld":"walked"}}"#,
+        )
+        .unwrap();
+        let subdir = temp.path().join("src").join("components");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let partial = find_and_load_package_json_config(&subdir).unwrap();
+        let mut cfg = Config::default();
+        apply_partial(&mut cfg, partial);
+        assert_eq!(cfg.proxy.tld, "walked");
     }
 }
