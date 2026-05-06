@@ -50,6 +50,21 @@ pub enum CliCommand {
         /// Override the auto-detected LAN IP (e.g. for VPN setups)
         #[arg(long, value_name = "ADDR")]
         ip: Option<String>,
+        /// Use HTTP/2 cleartext (h2c) for upstream connections (for gRPC backends)
+        #[arg(long)]
+        h2c: bool,
+        /// Share this app on your Tailscale tailnet
+        #[arg(long)]
+        tailscale: bool,
+        /// Share this app publicly via Tailscale Funnel (implies --tailscale)
+        #[arg(long)]
+        funnel: bool,
+        /// Register as a specific slot number (default: auto-assign next available)
+        #[arg(long)]
+        slot: Option<u32>,
+        /// Label shown in the app-switcher UI (default: slot-N)
+        #[arg(long)]
+        label: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -235,6 +250,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 quiet,
                 false,
                 false,
+                false,
+                false,
+                None,
+                None,
             )
             .await?;
         }
@@ -427,6 +446,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     protocol: crate::routes::RouteProtocol::Http,
                     pid: 0,
                     cwd: String::new(),
+                    slot: None,
+                    label: None,
                 },
             ).await?;
             let resp: crate::proto::Response = read_frame(&mut stream).await?;
@@ -508,12 +529,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             force,
             lan,
             ip,
+            h2c,
+            tailscale,
+            funnel,
+            slot,
+            label,
             args,
         } => {
             let cwd = std::env::current_dir()?;
             let mut config = crate::config::Config::load(&cwd)?;
             if lan { config.proxy.lan = true; }
             if let Some(addr) = ip { config.proxy.lan_ip = Some(addr); }
+            if h2c { config.proxy.h2c = true; }
+            let use_tailscale = tailscale || funnel;
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
             do_run(
                 cwd,
@@ -525,6 +553,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 quiet,
                 tcp,
                 force,
+                use_tailscale,
+                funnel,
+                slot,
+                label,
             )
             .await?;
         }
@@ -723,6 +755,8 @@ async fn run_monorepo(
                             protocol: crate::routes::RouteProtocol::Http,
                             pid: child_pid,
                             cwd: cwd.to_string_lossy().to_string(),
+                            slot: None,
+                            label: None,
                         },
                     )
                     .await;
@@ -764,6 +798,10 @@ async fn do_run(
     quiet: bool,
     tcp: bool,
     force: bool,
+    tailscale: bool,
+    funnel: bool,
+    slot: Option<u32>,
+    label: Option<String>,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -992,6 +1030,8 @@ async fn do_run(
                 },
                 pid: child_pid,
                 cwd: cwd.to_string_lossy().to_string(),
+                slot,
+                label: label.clone(),
             },
         )
         .await;
@@ -1030,6 +1070,36 @@ async fn do_run(
         }
     }
 
+    // Tailscale sharing (HTTP routes only)
+    let mut ts_https_port: Option<u16> = None;
+    if tailscale && !tcp {
+        if !crate::tailscale::is_installed() {
+            eprintln!("warning: tailscale CLI not found in PATH");
+        } else {
+            match crate::tailscale::register(port, funnel) {
+                Ok((https_port, ts_url)) => {
+                    ts_https_port = Some(https_port);
+                    if let Ok(mut s) = ipc_connect().await {
+                        let _ = write_frame(&mut s, &Command::UpdateRoute {
+                            hostname: hostname.clone(),
+                            tailscale_url: Some(ts_url.clone()),
+                            tailscale_https_port: Some(https_port),
+                            tailscale_funnel: Some(funnel),
+                        }).await;
+                        let _: crate::proto::Response = read_frame(&mut s).await
+                            .unwrap_or(crate::proto::Response::ok_empty());
+                    }
+                    if !quiet {
+                        println!("  Tailscale: {ts_url}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: tailscale: {e}");
+                }
+            }
+        }
+    }
+
     // Wait for child to exit, or intercept Ctrl+C to stop it gracefully.
     tokio::select! {
         _ = child.wait() => {},
@@ -1043,6 +1113,14 @@ async fn do_run(
             }
         }
     }
+
+    // Clean up Tailscale mapping after child exits
+    if let Some(https_port) = ts_https_port {
+        if let Err(e) = crate::tailscale::unregister(https_port, funnel) {
+            tracing::warn!("tailscale unregister failed: {e}");
+        }
+    }
+
     Ok(())
 }
 
@@ -1969,6 +2047,33 @@ mod tests {
             run_sub.get_arguments().any(|a| a.get_id() == "force"),
             "run subcommand must have --force flag"
         );
+    }
+
+    #[test]
+    fn run_command_has_tailscale_and_funnel_args() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let run_sub = cmd.find_subcommand("run").expect("run subcommand");
+        let args: Vec<&str> = run_sub
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(args.contains(&"tailscale"), "run should have --tailscale");
+        assert!(args.contains(&"funnel"), "run should have --funnel");
+        assert!(args.contains(&"h2c"), "run should have --h2c");
+    }
+
+    #[test]
+    fn run_command_has_slot_and_label_args() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let run_sub = cmd.find_subcommand("run").expect("run subcommand");
+        let args: Vec<&str> = run_sub
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        assert!(args.contains(&"slot"), "run should have --slot");
+        assert!(args.contains(&"label"), "run should have --label");
     }
 
     #[test]

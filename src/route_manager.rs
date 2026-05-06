@@ -22,8 +22,21 @@ impl RouteManager {
         self.store.get(hostname)
     }
 
+    pub fn get_slot(&self, hostname: &str, slot: u32) -> Option<Route> {
+        self.store.get_slot(hostname, slot)
+    }
+
+    pub fn list_slots(&self, hostname: &str) -> Vec<Route> {
+        self.store.list_slots(hostname)
+    }
+
     pub fn list(&self) -> Vec<Route> {
         self.store.list()
+    }
+
+    /// Replace a specific slot in-place (no auto-slot-assignment). Used for patch operations.
+    pub async fn update_slot(&self, route: Route) -> Result<()> {
+        self.store.update_slot(route).await
     }
 
     pub async fn insert(&self, route: Route) -> Result<()> {
@@ -42,6 +55,11 @@ impl RouteManager {
     pub async fn remove(&self, hostname: &str) -> Result<()> {
         self.tcp.remove(hostname).await;
         self.store.remove(hostname).await
+    }
+
+    pub async fn remove_slot(&self, hostname: &str, slot: u32) -> crate::error::Result<()> {
+        self.tcp.remove(hostname).await; // TCP routes don't use slots, safe to no-op
+        self.store.remove_slot(hostname, slot).await
     }
 
     pub async fn remove_stale(&self) -> Result<Vec<Route>> {
@@ -75,6 +93,11 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }
     }
 
@@ -88,6 +111,11 @@ mod tests {
             owner_pid: std::process::id(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
         }
     }
 

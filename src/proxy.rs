@@ -41,7 +41,7 @@ pub fn is_http_method_prefix(buf: &[u8]) -> bool {
     }
     matches!(
         &buf[..3],
-        b"GET" | b"PUT" | b"POS" | b"HEA" | b"DEL" | b"PAT" | b"OPT" | b"CON"
+        b"GET" | b"PUT" | b"POS" | b"HEA" | b"DEL" | b"PAT" | b"OPT" | b"CON" | b"PRI"
     )
 }
 
@@ -272,6 +272,18 @@ pub fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect RFC 8441 Extended CONNECT (WebSocket over HTTP/2).
+/// Browsers send CONNECT with `protocol: websocket` header instead of Upgrade.
+fn is_h2_websocket_connect<B>(req: &Request<B>) -> bool {
+    req.method() == hyper::Method::CONNECT
+        && req
+            .headers()
+            .get("protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("websocket"))
+            .unwrap_or(false)
+}
+
 /// Returns true if the request prefers HTML responses (i.e. a browser navigation).
 fn wants_html(headers: &http::HeaderMap) -> bool {
     headers
@@ -306,6 +318,7 @@ pub async fn handle_https_request(
     routes: crate::routes::StateStore,
     inspector: Option<crate::inspector::InspectorSender>,
     wildcard: bool,
+    h2c: bool,
 ) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
     let start = std::time::Instant::now();
 
@@ -320,7 +333,7 @@ pub async fn handle_https_request(
 
     let hostname = {
         let from_host = extract_host(req.headers().get(http::header::HOST));
-        if routes.get(&from_host).is_some() {
+        if !routes.list_slots(&from_host).is_empty() {
             from_host
         } else {
             // Fallback: reverse proxies (ngrok, Cloudflare Tunnel) pass the original
@@ -352,31 +365,52 @@ pub async fn handle_https_request(
         });
     }
 
-    let route = match routes.get(&hostname).or_else(|| {
-        if wildcard {
-            wildcard_parent(&hostname).and_then(|parent| routes.get(&parent))
+    // Slot-aware route lookup
+    let slots = {
+        let direct = routes.list_slots(&hostname);
+        if !direct.is_empty() {
+            direct
+        } else if wildcard {
+            wildcard_parent(&hostname)
+                .map(|parent| routes.list_slots(&parent))
+                .unwrap_or_default()
         } else {
-            None
-        }
-    }) {
-        Some(r) => r,
-        None => {
-            return Ok(if accept_html {
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header("content-type", "text/html")
-                    .body(full_body(crate::pages::page_404(&hostname)))
-                    .unwrap()
-            } else {
-                plain_error(
-                    StatusCode::NOT_FOUND,
-                    &format!("no route registered for {hostname}"),
-                )
-            });
+            vec![]
         }
     };
 
-    if is_websocket_upgrade(&req) {
+    if slots.is_empty() {
+        return Ok(if accept_html {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("content-type", "text/html")
+                .body(full_body(crate::pages::page_404(&hostname)))
+                .unwrap()
+        } else {
+            plain_error(
+                StatusCode::NOT_FOUND,
+                &format!("no route registered for {hostname}"),
+            )
+        });
+    }
+
+    let route = if slots.len() == 1 {
+        slots[0].clone()
+    } else {
+        let cookie_header = req
+            .headers()
+            .get(http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let preferred = crate::switcher::read_slot_from_cookies(cookie_header, &hostname);
+        let primary = slots[0].clone();
+        slots.iter().find(|r| r.slot == preferred).cloned().unwrap_or(primary)
+    };
+
+    // Keep all slots for switcher injection
+    let slots_for_injection = slots;
+
+    if is_websocket_upgrade(&req) || is_h2_websocket_connect(&req) {
         // WebSocket upgrade errors are always plain-text — they bypass the accept_html branch
         // because WebSocket clients never send Accept: text/html
         return handle_websocket(req, route.port).await;
@@ -438,10 +472,21 @@ pub async fn handle_https_request(
         .headers
         .insert("x-forwarded-proto", "https".parse().unwrap());
 
-    // Reuse a shared HTTP client for connection pooling and keep-alive
+    // Reuse a shared HTTP client for connection pooling and keep-alive.
     static HTTP_CLIENT: std::sync::OnceLock<Client<HttpConnector, BoxBodyType>> =
         std::sync::OnceLock::new();
-    let client = HTTP_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http());
+    static H2C_CLIENT: std::sync::OnceLock<Client<HttpConnector, BoxBodyType>> =
+        std::sync::OnceLock::new();
+
+    let client = if h2c {
+        H2C_CLIENT.get_or_init(|| {
+            Client::builder(TokioExecutor::new())
+                .http2_only(true)
+                .build_http()
+        })
+    } else {
+        HTTP_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+    };
     let upstream_req = Request::from_parts(parts, full_body(req_body_bytes.clone()));
 
     match client.request(upstream_req).await {
@@ -518,6 +563,26 @@ pub async fn handle_https_request(
                 let resp_bytes = match resp_body.collect().await {
                     Ok(c) => c.to_bytes(),
                     Err(_) => bytes::Bytes::new(),
+                };
+
+                // Inject app-switcher for multi-slot hostnames into text/html responses
+                let resp_bytes = if slots_for_injection.len() > 1 {
+                    let ct = resp_parts
+                        .headers
+                        .get(http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    crate::switcher::inject_switcher(
+                        &resp_bytes,
+                        ct,
+                        &hostname,
+                        &slots_for_injection,
+                        route.slot,
+                    )
+                    .map(|injected| bytes::Bytes::from(injected))
+                    .unwrap_or(resp_bytes)
+                } else {
+                    resp_bytes
                 };
 
                 if let Some(sender) = &inspector {
@@ -754,6 +819,13 @@ mod tests {
     }
 
     #[test]
+    fn h2_preface_detected_as_http() {
+        // PRI is the first 3 bytes of the HTTP/2 connection preface
+        assert!(is_http_method_prefix(b"PRI"), "H2 preface should be routed to HTTP path");
+        assert!(!is_http_method_prefix(b"\x16\x03\x01"), "TLS should not match");
+    }
+
+    #[test]
     fn http_method_prefix_rejects_short_buffer() {
         assert!(!is_http_method_prefix(b"G"));
         assert!(!is_http_method_prefix(b"PO"));
@@ -918,6 +990,46 @@ mod tests {
         let req_without_upgrade = Request::builder().uri("/").body(()).unwrap();
 
         assert!(!is_websocket_upgrade(&req_without_upgrade));
+    }
+
+    #[test]
+    fn h2_websocket_connect_detection() {
+        // RFC 8441 Extended CONNECT — WebSocket over HTTP/2
+        let req = Request::builder()
+            .method("CONNECT")
+            .header("protocol", "websocket")
+            .uri("https://myapp.localhost/ws")
+            .body(())
+            .unwrap();
+        assert!(is_h2_websocket_connect(&req), "should detect H2 websocket");
+
+        // Plain HTTP/2 CONNECT (not websocket) — should not match
+        let req2 = Request::builder()
+            .method("CONNECT")
+            .header("protocol", "tcp")
+            .uri("https://myapp.localhost/ws")
+            .body(())
+            .unwrap();
+        assert!(!is_h2_websocket_connect(&req2), "plain CONNECT should not match");
+
+        // H1 websocket upgrade — should not match is_h2 function
+        let req3 = Request::builder()
+            .method("GET")
+            .header("upgrade", "websocket")
+            .uri("https://myapp.localhost/ws")
+            .body(())
+            .unwrap();
+        assert!(!is_h2_websocket_connect(&req3), "H1 websocket should not match H2 function");
+    }
+
+    #[test]
+    fn switcher_read_slot_from_cookies_integration() {
+        let cookie = "portless-slot-myapp-localhost=1";
+        let slot = crate::switcher::read_slot_from_cookies(cookie, "myapp.localhost");
+        assert_eq!(slot, 1, "should select slot 1 from cookie");
+
+        let slot_default = crate::switcher::read_slot_from_cookies("", "myapp.localhost");
+        assert_eq!(slot_default, 0, "should default to slot 0 when no cookie");
     }
 
     #[test]

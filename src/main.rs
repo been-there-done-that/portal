@@ -14,6 +14,8 @@ mod proto;
 mod proxy;
 mod route_manager;
 mod routes;
+mod switcher;
+mod tailscale;
 mod tcp;
 mod workspace;
 

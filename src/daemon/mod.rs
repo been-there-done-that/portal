@@ -222,6 +222,11 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
                             owner_pid: std::process::id(),
                             cwd: String::new(),
                             created_at: chrono::Utc::now(),
+                            slot: 0,
+                            label: None,
+                            tailscale_url: None,
+                            tailscale_https_port: None,
+                            tailscale_funnel: false,
                         })
                         .await;
                     tracing::info!(
@@ -332,11 +337,11 @@ async fn serve_https(
     use tokio_rustls::TlsAcceptor;
 
     let resolver = Arc::new(crate::certs::PortlessCertResolver::new(cert_store));
-    let tls_config = Arc::new(
-        ServerConfig::builder()
-            .with_no_client_auth()
-            .with_cert_resolver(resolver),
-    );
+    let mut server_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tls_config = Arc::new(server_config);
     let acceptor = TlsAcceptor::from(tls_config);
 
     loop {
@@ -397,18 +402,18 @@ async fn serve_https(
 
             if crate::proxy::is_http_method_prefix(&peeked) {
                 // HTTP path: replay peeked bytes + rest of stream → hyper
+                // Use auto::Builder for HTTP/1.1 + HTTP/2 auto-negotiation via ALPN
                 let prefixed = crate::proxy::PrefixedIo::new(peeked, tls_stream);
                 let io = hyper_util::rt::TokioIo::new(prefixed);
-                hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection_with_upgrades(
                         io,
                         hyper::service::service_fn(move |req| {
                             let r = routes.clone();
                             let insp = inspector.clone();
-                            async move { crate::proxy::handle_https_request(req, r, insp, wc).await }
+                            async move { crate::proxy::handle_https_request(req, r, insp, wc, false).await }
                         }),
                     )
-                    .with_upgrades()
                     .await
                     .ok();
             } else {
