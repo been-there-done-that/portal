@@ -272,6 +272,18 @@ pub fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect RFC 8441 Extended CONNECT (WebSocket over HTTP/2).
+/// Browsers send CONNECT with `protocol: websocket` header instead of Upgrade.
+fn is_h2_websocket_connect<B>(req: &Request<B>) -> bool {
+    req.method() == hyper::Method::CONNECT
+        && req
+            .headers()
+            .get("protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("websocket"))
+            .unwrap_or(false)
+}
+
 /// Returns true if the request prefers HTML responses (i.e. a browser navigation).
 fn wants_html(headers: &http::HeaderMap) -> bool {
     headers
@@ -376,7 +388,7 @@ pub async fn handle_https_request(
         }
     };
 
-    if is_websocket_upgrade(&req) {
+    if is_websocket_upgrade(&req) || is_h2_websocket_connect(&req) {
         // WebSocket upgrade errors are always plain-text — they bypass the accept_html branch
         // because WebSocket clients never send Accept: text/html
         return handle_websocket(req, route.port).await;
@@ -925,6 +937,36 @@ mod tests {
         let req_without_upgrade = Request::builder().uri("/").body(()).unwrap();
 
         assert!(!is_websocket_upgrade(&req_without_upgrade));
+    }
+
+    #[test]
+    fn h2_websocket_connect_detection() {
+        // RFC 8441 Extended CONNECT — WebSocket over HTTP/2
+        let req = Request::builder()
+            .method("CONNECT")
+            .header("protocol", "websocket")
+            .uri("https://myapp.localhost/ws")
+            .body(())
+            .unwrap();
+        assert!(is_h2_websocket_connect(&req), "should detect H2 websocket");
+
+        // Plain HTTP/2 CONNECT (not websocket) — should not match
+        let req2 = Request::builder()
+            .method("CONNECT")
+            .header("protocol", "tcp")
+            .uri("https://myapp.localhost/ws")
+            .body(())
+            .unwrap();
+        assert!(!is_h2_websocket_connect(&req2), "plain CONNECT should not match");
+
+        // H1 websocket upgrade — should not match is_h2 function
+        let req3 = Request::builder()
+            .method("GET")
+            .header("upgrade", "websocket")
+            .uri("https://myapp.localhost/ws")
+            .body(())
+            .unwrap();
+        assert!(!is_h2_websocket_connect(&req3), "H1 websocket should not match H2 function");
     }
 
     #[test]
