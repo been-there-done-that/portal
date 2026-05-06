@@ -265,11 +265,10 @@ impl StateStore {
             .map
             .iter()
             .filter(|e| {
-                e.key() != "_.localhost"
-                    && e.value()
-                        .first()
-                        .map(|r| r.protocol == RouteProtocol::Http)
-                        .unwrap_or(false)
+                e.value()
+                    .first()
+                    .map(|r| r.protocol == RouteProtocol::Http)
+                    .unwrap_or(false)
             })
             .map(|e| e.key().clone())
             .collect();

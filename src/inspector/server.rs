@@ -134,7 +134,7 @@ async fn get_routes(State(state): State<AppState>) -> impl IntoResponse {
     let all_routes = state.routes.list();
     let routes: Vec<RouteResponse> = all_routes
         .into_iter()
-        .filter(|r| r.hostname != "_.localhost")
+        .filter(|r| r.hostname != "portal.localhost")
         .map(|r| RouteResponse {
             hostname: r.hostname,
             port: r.port,

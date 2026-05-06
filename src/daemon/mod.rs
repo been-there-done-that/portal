@@ -229,14 +229,14 @@ async fn run_daemon_loop(mode: DaemonMode, http_port_override: Option<u16>, http
         // Pre-generate the portal.localhost cert at startup so TLS works on first connection.
         // When the daemon runs as root (normal path via ensure_daemon_running), this writes the
         // cert to disk before the chown loop hands ownership back to the user.
-        let _ = cert_store.cert_for_host("_.localhost");
+        let _ = cert_store.cert_for_host("portal.localhost");
 
         let inspector =
             match crate::inspector::Inspector::start(state_dir.join("inspector.db"), manager.clone()).await {
                 Ok(insp) => {
                     let _ = manager
                         .insert(crate::routes::Route {
-                            hostname: "_.localhost".to_string(),
+                            hostname: "portal.localhost".to_string(),
                             port: insp.port,
                             public_port: None,
                             protocol: RouteProtocol::Http,
