@@ -65,6 +65,12 @@ pub enum CliCommand {
         /// Label shown in the app-switcher UI (default: slot-N)
         #[arg(long)]
         label: Option<String>,
+        /// Disable automatic branch-name prefix in git worktrees
+        #[arg(long)]
+        no_branch_prefix: bool,
+        /// Override the npm/pnpm/yarn/bun script to run (default: auto-detected from package.json)
+        #[arg(long)]
+        script: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -254,6 +260,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 false,
                 None,
                 None,
+                false,
+                None, // script
             )
             .await?;
         }
@@ -534,6 +542,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             funnel,
             slot,
             label,
+            no_branch_prefix,
+            script,
             args,
         } => {
             let cwd = std::env::current_dir()?;
@@ -542,7 +552,36 @@ pub async fn run(cli: Cli) -> Result<()> {
             if let Some(addr) = ip { config.proxy.lan_ip = Some(addr); }
             if h2c { config.proxy.h2c = true; }
             let use_tailscale = tailscale || funnel;
-            let resolved_args = crate::detect::resolve_run_args(&cwd, args);
+
+            // Apply --script override: only when user gave no explicit args
+            let resolved_args = if args.is_empty() {
+                if let Some(ref name) = script {
+                    let pkg_path = cwd.join("package.json");
+                    let found = pkg_path.exists() && {
+                        std::fs::read_to_string(&pkg_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            .and_then(|j| {
+                                crate::detect::node::pick_script(&j, Some(name.as_str()))
+                            })
+                            .is_some()
+                    };
+                    if found {
+                        let pm = crate::detect::node::detect_package_manager(&cwd);
+                        vec![pm.to_string(), "run".to_string(), name.clone()]
+                    } else {
+                        eprintln!(
+                            "warning: script \"{name}\" not found in package.json, falling back to auto-detect"
+                        );
+                        crate::detect::resolve_run_args(&cwd, args)
+                    }
+                } else {
+                    crate::detect::resolve_run_args(&cwd, args)
+                }
+            } else {
+                crate::detect::resolve_run_args(&cwd, args)
+            };
+
             do_run(
                 cwd,
                 config,
@@ -557,6 +596,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 funnel,
                 slot,
                 label,
+                no_branch_prefix,
+                script,
             )
             .await?;
         }
@@ -802,6 +843,8 @@ async fn do_run(
     funnel: bool,
     slot: Option<u32>,
     label: Option<String>,
+    no_branch_prefix: bool,
+    script: Option<String>,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -821,6 +864,20 @@ async fn do_run(
 
     let hostname =
         crate::detect::resolve_hostname(&cwd, hostname_override.as_deref(), &config.proxy.tld);
+
+    // Auto-prefix with branch name when inside a git linked worktree
+    let hostname = if !no_branch_prefix && hostname_override.is_none() {
+        if let Some(branch) = crate::git::current_branch(&cwd)
+            .filter(|_| crate::git::is_linked_worktree(&cwd))
+        {
+            format!("{branch}.{hostname}")
+        } else {
+            hostname
+        }
+    } else {
+        hostname
+    };
+
     let public_url = build_public_url(&config, &hostname);
 
     // Check for an existing live route for this hostname (replace-by-default)
@@ -2074,6 +2131,47 @@ mod tests {
             .collect();
         assert!(args.contains(&"slot"), "run should have --slot");
         assert!(args.contains(&"label"), "run should have --label");
+    }
+
+    #[test]
+    fn run_command_has_no_branch_prefix_arg() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["portal", "run", "npm", "start"]).unwrap();
+        if let CliCommand::Run { no_branch_prefix, .. } = cli.command {
+            assert!(!no_branch_prefix, "no_branch_prefix should default to false");
+        } else {
+            panic!("expected Run command");
+        }
+        let cli = Cli::try_parse_from(["portal", "run", "--no-branch-prefix", "npm", "start"]).unwrap();
+        if let CliCommand::Run { no_branch_prefix, .. } = cli.command {
+            assert!(no_branch_prefix, "no_branch_prefix should be true when flag is passed");
+        } else {
+            panic!("expected Run command");
+        }
+    }
+
+    #[test]
+    fn run_command_has_script_arg() {
+        let cli = Cli::try_parse_from(["portal", "run", "--script", "start", "npm", "run", "dev"])
+            .expect("parse failed");
+        match cli.command {
+            CliCommand::Run { script, .. } => {
+                assert_eq!(script, Some("start".to_string()));
+            }
+            _ => panic!("expected Run variant"),
+        }
+    }
+
+    #[test]
+    fn run_command_script_absent_by_default() {
+        let cli = Cli::try_parse_from(["portal", "run", "npm", "run", "dev"])
+            .expect("parse failed");
+        match cli.command {
+            CliCommand::Run { script, .. } => {
+                assert_eq!(script, None);
+            }
+            _ => panic!("expected Run variant"),
+        }
     }
 
     #[test]
