@@ -10,6 +10,9 @@ pub struct ProxyConfig {
     pub https: bool,
     pub http_port: u16,
     pub https_port: u16,
+    pub wildcard: bool,
+    pub lan: bool,
+    pub lan_ip: Option<String>,
 }
 
 impl Default for ProxyConfig {
@@ -20,6 +23,9 @@ impl Default for ProxyConfig {
             https: true,
             http_port: 80,
             https_port: 443,
+            wildcard: false,
+            lan: false,
+            lan_ip: None,
         }
     }
 }
@@ -74,6 +80,8 @@ pub struct ProjectConfig {
     pub port_position: Option<String>,
     /// Name of the env var to use for passing the port (e.g. "APP_PORT")
     pub port_env: Option<String>,
+    /// Whether to proxy this service (None = auto-detect, Some(false) = build-only mode, Some(true) = force proxy)
+    pub proxy: Option<bool>,
 }
 
 /// Complete configuration
@@ -102,6 +110,9 @@ struct PartialProxyConfig {
     https: Option<bool>,
     http_port: Option<u16>,
     https_port: Option<u16>,
+    wildcard: Option<bool>,
+    lan: Option<bool>,
+    lan_ip: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -118,6 +129,7 @@ struct PartialProjectConfig {
     host_arg: Option<String>,
     port_position: Option<String>,
     port_env: Option<String>,
+    proxy: Option<bool>,
 }
 
 impl Config {
@@ -187,6 +199,15 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     if let Some(https_port) = partial.proxy.https_port {
         config.proxy.https_port = https_port;
     }
+    if let Some(wildcard) = partial.proxy.wildcard {
+        config.proxy.wildcard = wildcard;
+    }
+    if let Some(lan) = partial.proxy.lan {
+        config.proxy.lan = lan;
+    }
+    if let Some(lan_ip) = partial.proxy.lan_ip {
+        config.proxy.lan_ip = Some(lan_ip);
+    }
 
     if let Some(log_level) = partial.daemon.log_level {
         config.daemon.log_level = log_level;
@@ -213,6 +234,9 @@ fn apply_partial(config: &mut Config, partial: PartialConfig) {
     if partial.project.port_env.is_some() {
         config.project.port_env = partial.project.port_env;
     }
+    if partial.project.proxy.is_some() {
+        config.project.proxy = partial.project.proxy;
+    }
 }
 
 /// Apply environment variable overrides
@@ -235,6 +259,12 @@ fn apply_env_overrides(config: &mut Config, env_overrides: &[(&str, &str)]) -> R
             "PORTAL_PORT_ENV" => {
                 config.project.port_env = Some(value.to_string());
             }
+            "PORTLESS_PROXY" => {
+                config.project.proxy = Some(matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+            }
+            "PORTLESS_WILDCARD" => config.proxy.wildcard = matches!(*value, "1" | "true" | "yes" | "on"),
+            "PORTLESS_LAN" => config.proxy.lan = matches!(*value, "1" | "true" | "yes" | "on"),
+            "PORTLESS_LAN_IP" => config.proxy.lan_ip = Some(value.to_string()),
             _ => {
                 // Ignore unknown env vars
             }

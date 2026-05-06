@@ -1,6 +1,8 @@
 use crate::error::Result;
 use std::path::Path;
 
+pub const PORTLESS_URL_ENV: &str = "PORTLESS_URL";
+
 /// Spawn a child dev server process.
 /// Callers provide `extra_env` — all env vars to set (PORT, PORTAL_URL, NODE_EXTRA_CA_CERTS, etc.).
 /// Handles PortInjection variants for framework-specific port passing.
@@ -111,6 +113,52 @@ pub async fn stop_child(child: &mut tokio::process::Child) -> Result<()> {
     };
 
     result
+}
+
+const BUILD_ONLY_TOOLS: &[&str] = &[
+    "tsc", "tsup", "esbuild", "rollup", "webpack", "parcel",
+];
+
+const BUILD_ONLY_SUBCMDS: &[(&str, &str)] = &[
+    ("vite", "build"),
+    ("next", "build"),
+    ("bun", "build"),
+    ("turbo", "build"),
+    ("nuxt", "build"),
+    ("astro", "build"),
+    ("svelte-kit", "build"),
+    ("rspack", "build"),
+    ("rsbuild", "build"),
+];
+
+/// Returns true when `args` represents a build-only tool that should not
+/// be proxied (it produces artifacts, not a long-running server).
+pub fn is_build_only(args: &[String]) -> bool {
+    let Some(first) = args.first() else { return false };
+
+    let basename = std::path::Path::new(first.as_str())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(first.as_str());
+    // Strip Windows .cmd / .exe suffixes
+    let basename = basename
+        .strip_suffix(".cmd")
+        .or_else(|| basename.strip_suffix(".exe"))
+        .unwrap_or(basename);
+
+    if BUILD_ONLY_TOOLS.contains(&basename) {
+        return true;
+    }
+
+    if let Some(second) = args.get(1) {
+        for (tool, subcmd) in BUILD_ONLY_SUBCMDS {
+            if basename == *tool && second == *subcmd {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -271,11 +319,11 @@ mod tests {
             let args = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("echo $PORTAL_URL > {}", test_file),
+                format!("echo $PORTLESS_URL > {}", test_file),
             ];
 
             let extra_env = vec![(
-                "PORTAL_URL".to_string(),
+                PORTLESS_URL_ENV.to_string(),
                 "https://myapp.localhost".to_string(),
             )];
             let mut child = spawn_child(
@@ -306,11 +354,11 @@ mod tests {
             let args = vec![
                 "cmd".to_string(),
                 "/C".to_string(),
-                format!("echo %PORTAL_URL% > {}", test_file),
+                format!("echo %PORTLESS_URL% > {}", test_file),
             ];
 
             let extra_env = vec![(
-                "PORTAL_URL".to_string(),
+                PORTLESS_URL_ENV.to_string(),
                 "https://myapp.localhost".to_string(),
             )];
             let mut child = spawn_child(
@@ -582,5 +630,52 @@ mod tests {
     fn double_dash_not_needed_for_npm_without_run() {
         let args = vec!["npm".into(), "start".into()];
         assert!(!needs_double_dash_separator(&args));
+    }
+
+    #[test]
+    fn portless_url_env_var_name_is_correct() {
+        // Ensures the exported env var name matches the JS reference implementation
+        assert_eq!(crate::process::PORTLESS_URL_ENV, "PORTLESS_URL");
+    }
+
+    #[test]
+    fn tsc_is_build_only() {
+        assert!(is_build_only(&["tsc".to_string()]));
+    }
+
+    #[test]
+    fn tsup_is_build_only() {
+        assert!(is_build_only(&["tsup".to_string(), "src/index.ts".to_string()]));
+    }
+
+    #[test]
+    fn vite_build_is_build_only() {
+        assert!(is_build_only(&["vite".to_string(), "build".to_string()]));
+    }
+
+    #[test]
+    fn vite_dev_is_not_build_only() {
+        assert!(!is_build_only(&["vite".to_string()]));
+        assert!(!is_build_only(&["vite".to_string(), "dev".to_string()]));
+    }
+
+    #[test]
+    fn next_build_is_build_only() {
+        assert!(is_build_only(&["next".to_string(), "build".to_string()]));
+    }
+
+    #[test]
+    fn next_dev_is_not_build_only() {
+        assert!(!is_build_only(&["next".to_string(), "dev".to_string()]));
+    }
+
+    #[test]
+    fn node_server_is_not_build_only() {
+        assert!(!is_build_only(&["node".to_string(), "server.js".to_string()]));
+    }
+
+    #[test]
+    fn empty_args_is_not_build_only() {
+        assert!(!is_build_only(&[]));
     }
 }

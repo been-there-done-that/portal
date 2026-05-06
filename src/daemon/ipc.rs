@@ -329,7 +329,22 @@ async fn dispatch(
                 created_at: chrono::Utc::now(),
             };
             match manager.insert(route).await {
-                Ok(_) => Response::ok_empty(),
+                Ok(_) => {
+                    let lan_enabled = std::env::var("PORTLESS_LAN")
+                        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+                        .unwrap_or(false);
+                    if lan_enabled && protocol == crate::routes::RouteProtocol::Http {
+                        let ip_str = std::env::var("PORTLESS_LAN_IP").ok();
+                        let ip = ip_str
+                            .as_deref()
+                            .and_then(|s| s.parse().ok())
+                            .or_else(crate::lan::detect_lan_ip);
+                        if let Some(ip) = ip {
+                            let _ = crate::lan::publish_mdns(&hostname, ip, http_port);
+                        }
+                    }
+                    Response::ok_empty()
+                }
                 Err(e) => Response::err(e.to_string()),
             }
         }
@@ -354,6 +369,61 @@ async fn dispatch(
             Ok(_) => Response::ok_empty(),
             Err(e) => Response::err(e.to_string()),
         },
+
+        Command::GetUrl { hostname } => {
+            match manager.get(&hostname) {
+                None => Response::err(format!("no route for \"{hostname}\"")),
+                Some(route) => {
+                    let url = public_url(https_enabled, &route.hostname, http_port, https_port);
+                    Response::ok(serde_json::json!({ "url": url }))
+                }
+            }
+        }
+
+        Command::Prune => {
+            let routes = manager.list();
+            let mut pruned: Vec<String> = Vec::new();
+
+            for route in routes {
+                if route.hostname == "_.localhost" {
+                    continue;
+                }
+                // Alias routes (pid == 0) are intentionally persistent
+                if route.pid == 0 {
+                    continue;
+                }
+                let is_dead = {
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::kill;
+                        use nix::unistd::Pid;
+                        // Reject PIDs that would overflow i32 (e.g. u32::MAX wraps to -1,
+                        // which has special kill(2) semantics and does not represent a real PID).
+                        match i32::try_from(route.pid) {
+                            Ok(v) if v > 0 => {
+                                // kill(pid, None) returns Ok if process exists, Err if not
+                                kill(Pid::from_raw(v), None).is_err()
+                            }
+                            _ => true, // Invalid PID is definitely dead
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    { false }
+                };
+                if is_dead {
+                    if let Err(e) = manager.remove(&route.hostname).await {
+                        tracing::warn!("prune: failed to remove {}: {e}", route.hostname);
+                    }
+                    pruned.push(route.hostname);
+                }
+            }
+
+            let values: Vec<serde_json::Value> = pruned
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect();
+            Response::ok(serde_json::Value::Array(values))
+        }
 
         Command::Run { .. } => Response::err("use portal run from CLI"),
     }
@@ -510,5 +580,57 @@ mod tests {
             display_target_for_route(&route, true, 80, 443),
             "localhost:46379"
         );
+    }
+
+    #[tokio::test]
+    async fn prune_removes_dead_routes_keeps_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path().join("routes.json")).unwrap();
+        let tcp_routes = TcpRouteManager::default();
+        let manager = RouteManager::new(store.clone(), tcp_routes);
+
+        // Dead route: pid that cannot possibly be running (u32::MAX)
+        store.insert(crate::routes::Route {
+            hostname: "dead.localhost".to_string(),
+            port: 4001,
+            public_port: None,
+            protocol: crate::routes::RouteProtocol::Http,
+            pid: u32::MAX,
+            owner_pid: u32::MAX,
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).await.unwrap();
+
+        // Alias route: pid == 0, must survive prune
+        store.insert(crate::routes::Route {
+            hostname: "alias.localhost".to_string(),
+            port: 4002,
+            public_port: None,
+            protocol: crate::routes::RouteProtocol::Http,
+            pid: 0,
+            owner_pid: 0,
+            cwd: "/tmp".to_string(),
+            created_at: chrono::Utc::now(),
+        }).await.unwrap();
+
+        let response = dispatch(
+            Command::Prune,
+            manager.clone(),
+            std::time::Instant::now(),
+            DaemonMode::TcpOnly,
+            dir.path().join("portal.sock"),
+            dir.path().join("daemon.pid"),
+            false,
+            80,
+            443,
+        ).await;
+
+        assert!(response.ok);
+        let pruned = response.data.unwrap();
+        let arr = pruned.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].as_str().unwrap(), "dead.localhost");
+        assert!(manager.get("alias.localhost").is_some(), "alias should survive");
+        assert!(manager.get("dead.localhost").is_none(), "dead route should be pruned");
     }
 }

@@ -15,6 +15,19 @@ pub const PORTAL_PORT_HEADER: &str = "x-portal-port";
 
 pub type BoxBodyType = BoxBody<Bytes, hyper::Error>;
 
+/// Strip the first DNS label from a hostname for wildcard fallback.
+/// "tenant.myapp.localhost" → Some("myapp.localhost")
+/// "myapp.localhost" → None (only two labels, no parent route possible)
+fn wildcard_parent(hostname: &str) -> Option<String> {
+    let rest = hostname.splitn(2, '.').nth(1)?;
+    // Require at least one more dot — the remainder must itself be a multi-label name
+    if rest.contains('.') {
+        Some(rest.to_string())
+    } else {
+        None
+    }
+}
+
 pub fn is_tls_client_hello(first_byte: u8) -> bool {
     first_byte == 0x16
 }
@@ -292,6 +305,7 @@ pub async fn handle_https_request(
     req: Request<Incoming>,
     routes: crate::routes::StateStore,
     inspector: Option<crate::inspector::InspectorSender>,
+    wildcard: bool,
 ) -> Result<Response<BoxBodyType>, std::convert::Infallible> {
     let start = std::time::Instant::now();
 
@@ -338,7 +352,13 @@ pub async fn handle_https_request(
         });
     }
 
-    let route = match routes.get(&hostname) {
+    let route = match routes.get(&hostname).or_else(|| {
+        if wildcard {
+            wildcard_parent(&hostname).and_then(|parent| routes.get(&parent))
+        } else {
+            None
+        }
+    }) {
         Some(r) => r,
         None => {
             return Ok(if accept_html {
@@ -898,6 +918,21 @@ mod tests {
         let req_without_upgrade = Request::builder().uri("/").body(()).unwrap();
 
         assert!(!is_websocket_upgrade(&req_without_upgrade));
+    }
+
+    #[test]
+    fn wildcard_parent_strips_first_label() {
+        assert_eq!(wildcard_parent("tenant.myapp.localhost"), Some("myapp.localhost".to_string()));
+    }
+
+    #[test]
+    fn wildcard_parent_single_label_returns_none() {
+        assert_eq!(wildcard_parent("myapp.localhost"), None);
+    }
+
+    #[test]
+    fn wildcard_parent_empty_returns_none() {
+        assert_eq!(wildcard_parent(""), None);
     }
 
     #[test]

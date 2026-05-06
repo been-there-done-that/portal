@@ -269,7 +269,7 @@ async fn run_daemon_loop(mode: DaemonMode) -> Result<()> {
         {
             let cs = cert_store.clone();
             let rt = manager.store().clone();
-            tokio::spawn(serve_https(https_listener, cs, rt, inspector.clone()));
+            tokio::spawn(serve_https(https_listener, cs, rt, inspector.clone(), config.proxy.wildcard));
         }
     } else {
         tracing::info!(
@@ -323,6 +323,7 @@ async fn serve_https(
     cert_store: CertStore,
     routes: StateStore,
     inspector: Option<crate::inspector::InspectorSender>,
+    wildcard: bool,
 ) {
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
@@ -345,6 +346,7 @@ async fn serve_https(
         let acceptor = acceptor.clone();
         let routes = routes.clone();
         let inspector = inspector.clone();
+        let wc = wildcard;
         tokio::spawn(async move {
             // Handle Postgres SSLRequest: if the first byte is 0x00, read the
             // 8-byte SSLRequest message and respond with 'S' (yes, use SSL).
@@ -403,7 +405,7 @@ async fn serve_https(
                         hyper::service::service_fn(move |req| {
                             let r = routes.clone();
                             let insp = inspector.clone();
-                            async move { crate::proxy::handle_https_request(req, r, insp).await }
+                            async move { crate::proxy::handle_https_request(req, r, insp, wc).await }
                         }),
                     )
                     .with_upgrades()

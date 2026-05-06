@@ -116,6 +116,9 @@ impl CertStore {
 
         let mut host_params = CertificateParams::new(vec![hostname.to_string()])
             .map_err(|e| Error::Cert(format!("failed to build host params: {e}")))?;
+        if let Some(ip) = lan_ip_san() {
+            host_params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
+        }
         host_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         host_params.not_after = rcgen::date_time_ymd(2034, 1, 1);
         host_params
@@ -287,6 +290,57 @@ fn install_system_trust_impl(_ca_path: &std::path::Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// System trust store removal
+// ---------------------------------------------------------------------------
+
+/// Return the LAN IP to embed as a SAN in host certs, if LAN mode is active.
+pub fn lan_ip_san() -> Option<std::net::IpAddr> {
+    std::env::var("PORTLESS_LAN_IP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
+/// Remove the portal CA from the system trust store.
+/// Best-effort: returns Ok even if the cert was never trusted.
+pub fn untrust_system_ca() -> Result<()> {
+    let ca_path = crate::config::dirs_for_state().join("certs").join("ca.pem");
+    untrust_system_ca_impl(&ca_path)
+}
+
+#[cfg(target_os = "macos")]
+fn untrust_system_ca_impl(ca_path: &std::path::Path) -> Result<()> {
+    if !ca_path.exists() {
+        return Ok(());
+    }
+    let status = std::process::Command::new("security")
+        .args([
+            "remove-trusted-cert",
+            "-d",
+            ca_path.to_str().ok_or_else(|| Error::Cert("invalid CA path".into()))?,
+        ])
+        .status()?;
+    if !status.success() {
+        tracing::warn!("security remove-trusted-cert exited {:?}", status.code());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn untrust_system_ca_impl(_ca_path: &std::path::Path) -> Result<()> {
+    let dest = std::path::Path::new("/usr/local/share/ca-certificates/portal-ca.crt");
+    if dest.exists() {
+        std::fs::remove_file(dest)?;
+        let _ = std::process::Command::new("update-ca-certificates").status();
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn untrust_system_ca_impl(_ca_path: &std::path::Path) -> Result<()> {
+    Ok(()) // no-op on unsupported platforms
+}
+
+// ---------------------------------------------------------------------------
 // PortlessCertResolver
 // ---------------------------------------------------------------------------
 
@@ -388,5 +442,12 @@ mod tests {
             !is_ca_trusted(),
             "unsupported platforms must always return false"
         );
+    }
+
+    #[test]
+    fn untrust_system_ca_does_not_panic_when_cert_missing() {
+        // Should be a no-op / best-effort — never panics even if cert doesn't exist
+        let result = untrust_system_ca();
+        assert!(result.is_ok());
     }
 }

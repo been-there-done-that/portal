@@ -41,6 +41,15 @@ pub enum CliCommand {
         /// Treat as a TCP service (skip HTTPS proxy; for databases, caches, etc.)
         #[arg(long)]
         tcp: bool,
+        /// Kill any existing process registered under this hostname and replace it
+        #[arg(long)]
+        force: bool,
+        /// Expose this app to the local network via mDNS .local hostname
+        #[arg(long)]
+        lan: bool,
+        /// Override the auto-detected LAN IP (e.g. for VPN setups)
+        #[arg(long, value_name = "ADDR")]
+        ip: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -52,6 +61,19 @@ pub enum CliCommand {
     Status,
     /// Remove a route (without killing its process)
     Rm { hostname: String },
+    /// Print the public URL for a named service
+    Get {
+        /// App name (becomes <name>.<tld>) or full hostname
+        name: String,
+    },
+    /// Find and kill orphaned dev servers left by crashed CLI sessions
+    Prune,
+    /// Stop daemon, remove CA trust, and delete all portal state
+    Clean {
+        /// Skip confirmation prompt (required in CI / non-interactive mode)
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Register a static route for an already-running service
     Alias {
         /// App name (becomes <name>.localhost)
@@ -163,6 +185,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         CliCommand::Start { quiet } => {
             let cwd = std::env::current_dir()?;
             let config = crate::config::Config::load(&cwd)?;
+
+            // Try monorepo: look for workspace root, discover packages
+            if let Some(root) = crate::workspace::find_workspace_root(&cwd) {
+                let packages = crate::workspace::discover_workspace_packages(&root, &config);
+                if packages.len() > 1 {
+                    return run_monorepo(packages, &root, config, quiet).await;
+                }
+            }
+
             let registry = crate::detect::DriverRegistry::new(&config);
 
             let driver = match registry.detect(&cwd) {
@@ -202,6 +233,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 None,
                 true,
                 quiet,
+                false,
                 false,
             )
             .await?;
@@ -255,6 +287,95 @@ pub async fn run(cli: Cli) -> Result<()> {
             write_frame(&mut stream, &Command::Rm { hostname }).await?;
             let resp = read_frame(&mut stream).await?;
             output::print_response(&resp);
+        }
+
+        CliCommand::Get { name } => {
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::Config::load(&cwd)?;
+            let hostname = if name.contains('.') {
+                name.clone()
+            } else {
+                format!("{}.{}", name, config.proxy.tld)
+            };
+            let mut stream = ipc_connect().await?;
+            write_frame(&mut stream, &Command::GetUrl { hostname }).await?;
+            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            if resp.ok {
+                if let Some(url) = resp.data.as_ref().and_then(|d| d.get("url")).and_then(|u| u.as_str()) {
+                    println!("{url}");
+                }
+            } else {
+                eprintln!("error: {}", resp.error.unwrap_or_default());
+                std::process::exit(1);
+            }
+        }
+
+        CliCommand::Prune => {
+            let mut stream = ipc_connect().await?;
+            write_frame(&mut stream, &Command::Prune).await?;
+            let resp: crate::proto::Response = read_frame(&mut stream).await?;
+            if resp.ok {
+                let pruned = resp.data
+                    .as_ref()
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if pruned.is_empty() {
+                    println!("nothing to prune");
+                } else {
+                    for h in &pruned {
+                        println!("pruned {h}");
+                    }
+                }
+            } else {
+                eprintln!("error: {}", resp.error.unwrap_or_default());
+                std::process::exit(1);
+            }
+        }
+
+        CliCommand::Clean { yes } => {
+            use std::io::IsTerminal;
+            let is_ci = std::env::var("CI").map(|v| !v.is_empty()).unwrap_or(false);
+            let is_tty = std::io::stdin().is_terminal();
+
+            if !yes {
+                if is_ci || !is_tty {
+                    eprintln!("error: --yes required in non-interactive mode");
+                    std::process::exit(1);
+                }
+                use dialoguer::Confirm;
+                let confirmed = Confirm::new()
+                    .with_prompt("This will stop the daemon and remove all portal state. Continue?")
+                    .default(false)
+                    .interact()
+                    .unwrap_or(false);
+                if !confirmed {
+                    return Ok(());
+                }
+            }
+
+            // 1. Try graceful shutdown (ignores error if daemon not running)
+            if let Ok(mut stream) = ipc_connect().await {
+                let _ = write_frame(&mut stream, &Command::Shutdown).await;
+                let _: std::result::Result<crate::proto::Response, _> = read_frame(&mut stream).await;
+                // Give daemon time to clean up hosts + remove socket
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+
+            // 2. Untrust CA (best-effort)
+            if let Err(e) = crate::certs::untrust_system_ca() {
+                eprintln!("warning: could not untrust CA: {e}");
+            }
+
+            // 3. Remove state directory
+            let state_dir = crate::config::dirs_for_state();
+            if state_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&state_dir) {
+                    eprintln!("warning: could not remove state dir: {e}");
+                }
+            }
+
+            println!("portal state cleared");
         }
 
         CliCommand::Alias { name, port, force, remove } => {
@@ -384,10 +505,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             port,
             quiet,
             tcp,
+            force,
+            lan,
+            ip,
             args,
         } => {
             let cwd = std::env::current_dir()?;
-            let config = crate::config::Config::load(&cwd)?;
+            let mut config = crate::config::Config::load(&cwd)?;
+            if lan { config.proxy.lan = true; }
+            if let Some(addr) = ip { config.proxy.lan_ip = Some(addr); }
             let resolved_args = crate::detect::resolve_run_args(&cwd, args);
             do_run(
                 cwd,
@@ -398,6 +524,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 false,
                 quiet,
                 tcp,
+                force,
             )
             .await?;
         }
@@ -504,6 +631,128 @@ pub async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// Monorepo orchestration: start all workspace packages concurrently.
+async fn run_monorepo(
+    packages: Vec<crate::workspace::WorkspacePackage>,
+    root: &std::path::Path,
+    config: crate::config::Config,
+    quiet: bool,
+) -> Result<()> {
+    let mut setup = if quiet {
+        banner::SetupPrinter::quiet()
+    } else {
+        banner::SetupPrinter::new()
+    };
+    ensure_daemon_running(&config, &mut setup, DaemonRequirement::Full).await?;
+    ensure_cert_trusted(&mut setup).await?;
+    setup.done();
+
+    let has_turbo = crate::workspace::has_turbo_config(root);
+
+    let mut handles = Vec::new();
+
+    for pkg in packages {
+        let hostname = crate::detect::resolve_hostname(
+            &pkg.dir,
+            None,
+            &config.proxy.tld,
+        );
+        let public_url = build_public_url(&config, &hostname);
+
+        let args = if has_turbo {
+            let pkg_name = pkg.name.clone();
+            vec![
+                "turbo".to_string(),
+                "run".to_string(),
+                "dev".to_string(),
+                format!("--filter={pkg_name}"),
+            ]
+        } else {
+            pkg.command.clone()
+        };
+
+        let port = crate::ports::find_free_port(
+            config.proxy.port_range.0,
+            config.proxy.port_range.1,
+        )?;
+
+        let ca_path = portal_ca_cert_path();
+        let mut extra_env = vec![
+            ("PORT".to_string(), port.to_string()),
+            (crate::process::PORTLESS_URL_ENV.to_string(), public_url.clone()),
+        ];
+        if config.proxy.https && ca_path.exists() {
+            extra_env.push((
+                "NODE_EXTRA_CA_CERTS".to_string(),
+                ca_path.to_string_lossy().into_owned(),
+            ));
+        }
+
+        let label = pkg.name.clone();
+        let hostname_clone = hostname.clone();
+        let cwd = pkg.dir.clone();
+        let injection = pkg.injection.clone();
+        let config_clone = config.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut child = match crate::process::spawn_child(
+                &cwd,
+                &args,
+                port,
+                injection,
+                &extra_env,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[{label}] failed to start: {e}");
+                    return;
+                }
+            };
+
+            let child_pid = child.id().unwrap_or(std::process::id());
+            match ipc_connect().await {
+                Ok(mut stream) => {
+                    let _ = write_frame(
+                        &mut stream,
+                        &Command::RegisterRoute {
+                            hostname: hostname_clone.clone(),
+                            port,
+                            public_port: None,
+                            protocol: crate::routes::RouteProtocol::Http,
+                            pid: child_pid,
+                            cwd: cwd.to_string_lossy().to_string(),
+                        },
+                    )
+                    .await;
+                    let _: std::result::Result<crate::proto::Response, _> = read_frame(&mut stream).await;
+                }
+                Err(_) => {
+                    eprintln!("[{label}] warning: could not register route with daemon");
+                }
+            }
+
+            if config_clone.proxy.https {
+                println!("[{label}] → https://{hostname_clone}");
+            } else {
+                println!("[{label}] → http://{hostname_clone}");
+            }
+
+            let _ = child.wait().await;
+        });
+
+        handles.push(handle);
+    }
+
+    for h in handles {
+        if let Err(e) = h.await {
+            eprintln!("worker task panicked: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// Core dev-server run logic shared by both `Run` and `Start`.
 async fn do_run(
     cwd: std::path::PathBuf,
@@ -514,6 +763,7 @@ async fn do_run(
     use_full_registry: bool,
     quiet: bool,
     tcp: bool,
+    force: bool,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -549,6 +799,32 @@ async fn do_run(
             None
         }
     };
+
+    // Guard: error if route is live and --force not set
+    if let Some(ref route) = existing_route {
+        if !force && route.pid != 0 {
+            let alive = {
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::kill;
+                    use nix::unistd::Pid;
+                    match i32::try_from(route.pid) {
+                        Ok(pid) if pid > 0 => kill(Pid::from_raw(pid), None).is_ok(),
+                        _ => false,
+                    }
+                }
+                #[cfg(not(unix))]
+                { false }
+            };
+            if alive {
+                eprintln!(
+                    "error: {} is already running (PID {}). Use --force to replace it.",
+                    hostname, route.pid
+                );
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Detect driver early — needed for service_port_candidates and injection.
     let registry = crate::detect::DriverRegistry::new(&config);
@@ -658,6 +934,24 @@ async fn do_run(
         None
     };
 
+    // Skip proxy if forced by config or if command is a known build-only tool
+    let is_build_only_cmd = config.project.proxy == Some(false)
+        || crate::process::is_build_only(&args);
+
+    if is_build_only_cmd {
+        // Run directly without registering a proxy route
+        let mut child = crate::process::spawn_child(
+            &cwd,
+            &args,
+            0,
+            crate::detect::PortInjection::EnvOnly,
+            &[],
+        )
+        .await?;
+        let _ = child.wait().await;
+        return Ok(());
+    }
+
     let injection = driver
         .map(|d| d.port_injection(&cwd, port))
         .unwrap_or(crate::detect::PortInjection::EnvOnly);
@@ -666,7 +960,7 @@ async fn do_run(
     let port_env_name = config.project.port_env.as_deref().unwrap_or("PORT");
     let mut extra_env: Vec<(String, String)> = vec![(port_env_name.to_string(), port.to_string())];
     if !tcp {
-        extra_env.push(("PORTAL_URL".to_string(), public_url.clone()));
+        extra_env.push((crate::process::PORTLESS_URL_ENV.to_string(), public_url.clone()));
         // Inject NODE_EXTRA_CA_CERTS so Node.js child processes trust our local CA
         if config.proxy.https {
             let ca_path = portal_ca_cert_path();
@@ -726,6 +1020,14 @@ async fn do_run(
         } else {
             banner::print_banner(&public_url, port, child_pid, existing_route.is_some());
         }
+        if config.proxy.lan {
+            let ip = config.proxy.lan_ip.as_deref()
+                .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+                .or_else(|| crate::lan::detect_lan_ip());
+            if let Some(ip) = ip {
+                println!("  LAN: https://{ip}  (from other devices on your network)");
+            }
+        }
     }
 
     // Wait for child to exit, or intercept Ctrl+C to stop it gracefully.
@@ -765,7 +1067,7 @@ fn portal_ca_cert_path() -> std::path::PathBuf {
 }
 
 
-fn parse_command_line(input: &str) -> Result<Vec<String>> {
+pub(crate) fn parse_command_line(input: &str) -> Result<Vec<String>> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut chars = input.chars().peekable();
@@ -1656,5 +1958,37 @@ mod tests {
             crate::daemon::DaemonMode::TcpOnly,
             DaemonRequirement::Full
         ));
+    }
+
+    #[test]
+    fn run_command_has_force_arg() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let run_sub = cmd.find_subcommand("run").expect("run subcommand");
+        assert!(
+            run_sub.get_arguments().any(|a| a.get_id() == "force"),
+            "run subcommand must have --force flag"
+        );
+    }
+
+    #[test]
+    fn workspace_packages_found_in_pnpm_monorepo() {
+        use tempfile::TempDir;
+        let root = TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - \"apps/*\"\n",
+        ).unwrap();
+        let apps = root.path().join("apps").join("web");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(
+            apps.join("package.json"),
+            r#"{"name":"web","scripts":{"dev":"vite"}}"#,
+        ).unwrap();
+        std::fs::write(apps.join("pnpm-lock.yaml"), "").unwrap();
+
+        let config = crate::config::Config::default();
+        let pkgs = crate::workspace::discover_workspace_packages(root.path(), &config);
+        assert_eq!(pkgs.len(), 1);
     }
 }

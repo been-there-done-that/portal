@@ -6,6 +6,7 @@ mod detect;
 mod error;
 mod hosts;
 mod inspector;
+mod lan;
 mod pages;
 mod ports;
 mod process;
@@ -14,6 +15,7 @@ mod proxy;
 mod route_manager;
 mod routes;
 mod tcp;
+mod workspace;
 
 use clap::Parser;
 use error::Result;
