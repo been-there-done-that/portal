@@ -24,10 +24,17 @@ pub(crate) fn detect_package_manager(cwd: &Path) -> &'static str {
     "npm"
 }
 
-fn pick_dev_script(json: &serde_json::Value) -> Option<String> {
+pub fn pick_script(json: &serde_json::Value, override_script: Option<&str>) -> Option<String> {
     let scripts = json.get("scripts")?.as_object()?;
     if scripts.is_empty() {
         return None;
+    }
+    if let Some(name) = override_script {
+        return if scripts.contains_key(name) {
+            Some(name.to_string())
+        } else {
+            None
+        };
     }
     for &preferred in &["dev", "start", "serve", "develop"] {
         if scripts.contains_key(preferred) {
@@ -71,6 +78,8 @@ pub fn resolve_run_args(cwd: &Path, args: Vec<String>) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Framework {
     Vite,
+    Rsbuild,
+    VitePress,
     Astro,
     Angular,
     ReactRouter,
@@ -92,6 +101,8 @@ impl Framework {
             Framework::ReactRouter | Framework::Expo | Framework::Nuxt | Framework::Remix => {
                 vec!["--port".into(), p]
             }
+            Framework::Rsbuild => vec!["--port".into(), p],
+            Framework::VitePress => vec!["--port".into(), p],
             Framework::Unknown => vec![],
         }
     }
@@ -104,10 +115,20 @@ fn detect_framework(cwd: &Path) -> Framework {
     if cwd.join("svelte.config.js").exists() || cwd.join("svelte.config.ts").exists() {
         return Framework::SvelteKit;
     }
+    // Rsbuild config file takes priority over script-string detection
+    if cwd.join("rsbuild.config.ts").exists() || cwd.join("rsbuild.config.js").exists() {
+        return Framework::Rsbuild;
+    }
     if let Ok(s) = fs::read_to_string(cwd.join("package.json")) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
             if let Some(scripts) = json.get("scripts").and_then(|v| v.as_object()) {
                 let scripts_str = serde_json::to_string(scripts).unwrap_or_default();
+                if scripts_str.contains("rsbuild") {
+                    return Framework::Rsbuild;
+                }
+                if scripts_str.contains("vitepress") {
+                    return Framework::VitePress;
+                }
                 if scripts_str.contains("vite") {
                     return Framework::Vite;
                 }
@@ -154,7 +175,7 @@ impl LanguageDriver for NodeDriver {
     fn start_command(&self, cwd: &Path) -> Option<String> {
         let contents = fs::read_to_string(cwd.join("package.json")).ok()?;
         let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
-        let script = pick_dev_script(&json)?;
+        let script = pick_script(&json, None)?;
         let pm = detect_package_manager(cwd);
         Some(format!("{pm} run {script}"))
     }
@@ -263,5 +284,97 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let args = vec!["npm".to_string(), "run".to_string(), "dev".to_string()];
         assert_eq!(resolve_run_args(tmp.path(), args.clone()), args);
+    }
+
+    #[test]
+    fn pick_script_override_uses_named_script() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"scripts":{"dev":"vite","start":"node server.js"}}"#).unwrap();
+        assert_eq!(
+            pick_script(&json, Some("start")),
+            Some("start".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_script_override_falls_back_when_missing() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"scripts":{"dev":"vite"}}"#).unwrap();
+        assert_eq!(pick_script(&json, Some("nonexistent")), None);
+    }
+
+    #[test]
+    fn pick_script_no_override_keeps_priority_order() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"scripts":{"build":"tsc","dev":"vite","start":"node s.js"}}"#)
+                .unwrap();
+        assert_eq!(pick_script(&json, None), Some("dev".to_string()));
+    }
+
+    #[test]
+    fn rsbuild_detection_from_config_file() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"node server.js"}}"#,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("rsbuild.config.ts"), "").unwrap();
+        assert_eq!(detect_framework(tmp.path()), Framework::Rsbuild);
+    }
+
+    #[test]
+    fn rsbuild_detection_from_scripts() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"rsbuild dev"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_framework(tmp.path()), Framework::Rsbuild);
+    }
+
+    #[test]
+    fn vitepress_detection_from_scripts() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"vitepress dev"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_framework(tmp.path()), Framework::VitePress);
+    }
+
+    #[test]
+    fn rsbuild_port_injection() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("rsbuild.config.ts"), "").unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"rsbuild dev"}}"#,
+        )
+        .unwrap();
+        match NodeDriver.port_injection(tmp.path(), 4000) {
+            crate::detect::PortInjection::CliArgs(args) => {
+                assert_eq!(args, vec!["--port".to_string(), "4000".to_string()]);
+            }
+            other => panic!("expected CliArgs([--port, 4000]), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vitepress_port_injection() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"vitepress dev"}}"#,
+        )
+        .unwrap();
+        match NodeDriver.port_injection(tmp.path(), 4000) {
+            crate::detect::PortInjection::CliArgs(args) => {
+                assert_eq!(args, vec!["--port".to_string(), "4000".to_string()]);
+            }
+            other => panic!("expected CliArgs([--port, 4000]), got {other:?}"),
+        }
     }
 }
