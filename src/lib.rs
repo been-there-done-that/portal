@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod detect;
 pub mod error;
+pub mod git;
 pub mod hosts;
 pub mod inspector;
 pub mod lan;
