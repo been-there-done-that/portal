@@ -20,17 +20,17 @@ async fn wait_for_port(port: u16, timeout: Duration) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires Node.js"]
 async fn express_fixture_responds_via_port() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/express");
     let port = find_free_port(5000, 5999).unwrap();
     let args = vec!["node".to_string(), "server.js".to_string()];
+    let extra_env = vec![("PORT".to_string(), port.to_string())];
     let mut child = spawn_child(
         &fixture,
         &args,
         port,
         portal::detect::PortInjection::EnvOnly,
-        &[],
+        &extra_env,
     )
     .await
     .unwrap();

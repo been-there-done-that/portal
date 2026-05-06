@@ -24,11 +24,23 @@ pub enum CliCommand {
     Daemon {
         #[arg(long, hide = true)]
         tcp_only: bool,
+        /// HTTP port for the proxy (default: 80; use e.g. 1080 to avoid sudo)
+        #[arg(long, value_name = "PORT")]
+        http_port: Option<u16>,
+        /// HTTPS port for the proxy (default: 443; use e.g. 1443 to avoid sudo)
+        #[arg(long, value_name = "PORT")]
+        https_port: Option<u16>,
     },
     /// Auto-detect and start the best dev script from package.json
     Start {
         #[arg(long, short = 'q', help = "Suppress startup banner and running output")]
         quiet: bool,
+        /// HTTP port for the proxy (default: 80; use e.g. 1080 to avoid sudo)
+        #[arg(long, value_name = "PORT")]
+        http_port: Option<u16>,
+        /// HTTPS port for the proxy (default: 443; use e.g. 1443 to avoid sudo)
+        #[arg(long, value_name = "PORT")]
+        https_port: Option<u16>,
     },
     /// Run a dev server and assign it a .localhost URL
     Run {
@@ -65,6 +77,12 @@ pub enum CliCommand {
         /// Label shown in the app-switcher UI (default: slot-N)
         #[arg(long)]
         label: Option<String>,
+        /// Disable automatic branch-name prefix in git worktrees
+        #[arg(long)]
+        no_branch_prefix: bool,
+        /// Override the npm/pnpm/yarn/bun script to run (default: auto-detected from package.json)
+        #[arg(long)]
+        script: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
     },
@@ -152,7 +170,7 @@ pub enum HostsAction {
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        CliCommand::Daemon { tcp_only } => {
+        CliCommand::Daemon { tcp_only, http_port, https_port } => {
             let mode = if tcp_only {
                 crate::daemon::DaemonMode::TcpOnly
             } else {
@@ -162,7 +180,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Check for port conflicts before starting (same picker as ensure_daemon_running)
             if matches!(mode, crate::daemon::DaemonMode::Full) {
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let config = crate::config::Config::load(&cwd).unwrap_or_default();
+                let mut config = crate::config::Config::load(&cwd).unwrap_or_default();
+                if let Some(p) = http_port { config.proxy.http_port = p; }
+                if let Some(p) = https_port { config.proxy.https_port = p; }
                 let ports_to_check = [config.proxy.http_port, config.proxy.https_port];
                 let conflicting = check_ports_free(&ports_to_check);
                 if !conflicting.is_empty() {
@@ -194,12 +214,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
 
-            crate::daemon::start(mode).await?;
+            crate::daemon::start(mode, http_port, https_port).await?;
         }
 
-        CliCommand::Start { quiet } => {
+        CliCommand::Start { quiet, http_port, https_port } => {
             let cwd = std::env::current_dir()?;
-            let config = crate::config::Config::load(&cwd)?;
+            let mut config = crate::config::Config::load(&cwd)?;
+            if let Some(p) = http_port { config.proxy.http_port = p; }
+            if let Some(p) = https_port { config.proxy.https_port = p; }
 
             // Try monorepo: look for workspace root, discover packages
             if let Some(root) = crate::workspace::find_workspace_root(&cwd) {
@@ -254,6 +276,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 false,
                 None,
                 None,
+                false,
+                None, // script
             )
             .await?;
         }
@@ -474,14 +498,32 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         CliCommand::Cert { action } => {
-            let mut stream = ipc_connect().await?;
-            let cmd = match action {
-                CertAction::Install => Command::CertInstall,
-                CertAction::Reset => Command::CertReset,
-            };
-            write_frame(&mut stream, &cmd).await?;
-            let resp = read_frame(&mut stream).await?;
-            output::print_response(&resp);
+            match action {
+                CertAction::Install => {
+                    // Run trust installation in the CLI process so macOS can
+                    // show the authorization dialog (Touch ID / password).
+                    // The daemon runs as a background process with no GUI
+                    // context and cannot trigger keychain authorization.
+                    let cert_store = crate::certs::CertStore::new(
+                        crate::config::dirs_for_state().join("certs"),
+                    );
+                    cert_store.ensure_ca()?;
+                    cert_store.install_system_trust()?;
+                    println!("CA certificate installed in the system trust store.");
+                }
+                CertAction::Reset => {
+                    let mut stream = ipc_connect().await?;
+                    write_frame(&mut stream, &Command::CertReset).await?;
+                    let resp = read_frame(&mut stream).await?;
+                    output::print_response(&resp);
+                    // After the daemon regenerates the CA, install it locally.
+                    let cert_store = crate::certs::CertStore::new(
+                        crate::config::dirs_for_state().join("certs"),
+                    );
+                    cert_store.install_system_trust()?;
+                    println!("CA certificate reset and re-installed.");
+                }
+            }
         }
 
         CliCommand::Hosts { action } => {
@@ -534,6 +576,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             funnel,
             slot,
             label,
+            no_branch_prefix,
+            script,
             args,
         } => {
             let cwd = std::env::current_dir()?;
@@ -542,7 +586,36 @@ pub async fn run(cli: Cli) -> Result<()> {
             if let Some(addr) = ip { config.proxy.lan_ip = Some(addr); }
             if h2c { config.proxy.h2c = true; }
             let use_tailscale = tailscale || funnel;
-            let resolved_args = crate::detect::resolve_run_args(&cwd, args);
+
+            // Apply --script override: only when user gave no explicit args
+            let resolved_args = if args.is_empty() {
+                if let Some(ref name) = script {
+                    let pkg_path = cwd.join("package.json");
+                    let found = pkg_path.exists() && {
+                        std::fs::read_to_string(&pkg_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            .and_then(|j| {
+                                crate::detect::node::pick_script(&j, Some(name.as_str()))
+                            })
+                            .is_some()
+                    };
+                    if found {
+                        let pm = crate::detect::node::detect_package_manager(&cwd);
+                        vec![pm.to_string(), "run".to_string(), name.clone()]
+                    } else {
+                        eprintln!(
+                            "warning: script \"{name}\" not found in package.json, falling back to auto-detect"
+                        );
+                        crate::detect::resolve_run_args(&cwd, args)
+                    }
+                } else {
+                    crate::detect::resolve_run_args(&cwd, args)
+                }
+            } else {
+                crate::detect::resolve_run_args(&cwd, args)
+            };
+
             do_run(
                 cwd,
                 config,
@@ -557,6 +630,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 funnel,
                 slot,
                 label,
+                no_branch_prefix,
+                script,
             )
             .await?;
         }
@@ -667,7 +742,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 async fn run_monorepo(
     packages: Vec<crate::workspace::WorkspacePackage>,
     root: &std::path::Path,
-    config: crate::config::Config,
+    mut config: crate::config::Config,
     quiet: bool,
 ) -> Result<()> {
     let mut setup = if quiet {
@@ -678,6 +753,8 @@ async fn run_monorepo(
     ensure_daemon_running(&config, &mut setup, DaemonRequirement::Full).await?;
     ensure_cert_trusted(&mut setup).await?;
     setup.done();
+
+    sync_ports_from_daemon(&mut config).await;
 
     let has_turbo = crate::workspace::has_turbo_config(root);
 
@@ -790,7 +867,7 @@ async fn run_monorepo(
 /// Core dev-server run logic shared by both `Run` and `Start`.
 async fn do_run(
     cwd: std::path::PathBuf,
-    config: crate::config::Config,
+    mut config: crate::config::Config,
     args: Vec<String>,
     hostname_override: Option<String>,
     port_override: Option<u16>,
@@ -802,6 +879,8 @@ async fn do_run(
     funnel: bool,
     slot: Option<u32>,
     label: Option<String>,
+    no_branch_prefix: bool,
+    script: Option<String>,
 ) -> Result<()> {
     let mut setup = if quiet {
         banner::SetupPrinter::quiet()
@@ -819,8 +898,26 @@ async fn do_run(
     }
     setup.done();
 
+    // Sync proxy ports from the running daemon — it may have been started with
+    // --http-port / --https-port overrides that differ from the on-disk config.
+    sync_ports_from_daemon(&mut config).await;
+
     let hostname =
         crate::detect::resolve_hostname(&cwd, hostname_override.as_deref(), &config.proxy.tld);
+
+    // Auto-prefix with branch name when inside a git linked worktree
+    let hostname = if !no_branch_prefix && hostname_override.is_none() {
+        if let Some(branch) = crate::git::current_branch(&cwd)
+            .filter(|_| crate::git::is_linked_worktree(&cwd))
+        {
+            format!("{branch}.{hostname}")
+        } else {
+            hostname
+        }
+    } else {
+        hostname
+    };
+
     let public_url = build_public_url(&config, &hostname);
 
     // Check for an existing live route for this hostname (replace-by-default)
@@ -1058,7 +1155,7 @@ async fn do_run(
                 existing_route.is_some(),
             );
         } else {
-            banner::print_banner(&public_url, port, child_pid, existing_route.is_some());
+            banner::print_banner(&public_url, port, child_pid, existing_route.is_some(), crate::certs::is_ca_trusted());
         }
         if config.proxy.lan {
             let ip = config.proxy.lan_ip.as_deref()
@@ -1138,6 +1235,23 @@ fn build_public_url(config: &crate::config::Config, hostname: &str) -> String {
         config.proxy.http_port,
         config.proxy.https_port,
     )
+}
+
+/// Query the running daemon for its actual http/https ports and update the config.
+/// This is needed when the daemon was started with --http-port / --https-port overrides
+/// that differ from the on-disk config defaults.
+async fn sync_ports_from_daemon(config: &mut crate::config::Config) {
+    let Ok(mut stream) = ipc_connect().await else { return };
+    if write_frame(&mut stream, &crate::proto::Command::Status).await.is_err() { return }
+    let Ok(resp) = read_frame::<_, crate::proto::Response>(&mut stream).await else { return };
+    if let Some(data) = resp.data {
+        if let Some(hp) = data.get("http_port").and_then(|v| v.as_u64()) {
+            config.proxy.http_port = hp as u16;
+        }
+        if let Some(hp) = data.get("https_port").and_then(|v| v.as_u64()) {
+            config.proxy.https_port = hp as u16;
+        }
+    }
 }
 
 fn portal_ca_cert_path() -> std::path::PathBuf {
@@ -1301,10 +1415,12 @@ async fn ensure_daemon_running(
         //      it forwards SUDO_USER/SUDO_UID/SUDO_GID to a grandchild, then exits quickly.
         //   3. The grandchild runs run_daemon_loop() as root with the correct state dir.
         // This mirrors how portless handles it: spawnSync("sudo", args, { stdio: "inherit" }).
+        let port_args = crate::daemon::port_override_args(config.proxy.http_port, config.proxy.https_port);
         let status = tokio::process::Command::new("sudo")
             .arg(&exe)
             .arg("daemon")
             .args(mode.daemon_args())
+            .args(&port_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
@@ -1353,9 +1469,11 @@ async fn ensure_daemon_running(
     };
     let daemon_pb = setup.begin_step("daemon", "starting…");
 
+    let port_args = crate::daemon::port_override_args(config.proxy.http_port, config.proxy.https_port);
     if let Err(err) = std::process::Command::new(&exe)
         .arg("daemon")
         .args(mode.daemon_args())
+        .args(&port_args)
         .env("PORTAL_IS_DAEMON", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1468,33 +1586,25 @@ async fn ensure_cert_trusted(setup: &mut banner::SetupPrinter) -> Result<()> {
         return Ok(());
     }
 
-    // Use plain_step (no spinner) — sudo needs raw TTY access, same as daemon start.
-    setup.plain_step("trust    installing CA certificate…  (sudo required)");
+    // macOS: installs to the user's login keychain — no sudo needed.
+    // Linux: install_system_trust internally escalates with sudo when not root.
+    // Use plain_step so any interactive prompt (macOS keychain dialog, Linux sudo) has raw TTY.
+    setup.plain_step("trust    installing CA certificate…");
 
-    let exe = std::env::current_exe()?;
-    let status = tokio::process::Command::new("sudo")
-        .arg(&exe)
-        .arg("cert")
-        .arg("install")
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await?;
-
-    if !status.success() {
+    let cert_store = crate::certs::CertStore::new(
+        crate::config::dirs_for_state().join("certs"),
+    );
+    cert_store.ensure_ca()?;
+    if let Err(e) = cert_store.install_system_trust() {
         setup.plain_step(&format!(
-            "{} trust   failed  (run `sudo portal cert install` manually)",
+            "{} trust   failed  (run `portal cert install` manually)",
             console::style("✗").red()
         ));
-        return Err(crate::error::Error::Cert(
-            "Failed to install CA certificate. Run `sudo portal cert install` manually."
-                .to_string(),
-        ));
+        return Err(e);
     }
 
     setup.plain_step(&format!(
-        "{} trust   installed  (sudo)",
+        "{} trust   installed",
         console::style("✓").green()
     ));
     Ok(())
@@ -2074,6 +2184,47 @@ mod tests {
             .collect();
         assert!(args.contains(&"slot"), "run should have --slot");
         assert!(args.contains(&"label"), "run should have --label");
+    }
+
+    #[test]
+    fn run_command_has_no_branch_prefix_arg() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["portal", "run", "npm", "start"]).unwrap();
+        if let CliCommand::Run { no_branch_prefix, .. } = cli.command {
+            assert!(!no_branch_prefix, "no_branch_prefix should default to false");
+        } else {
+            panic!("expected Run command");
+        }
+        let cli = Cli::try_parse_from(["portal", "run", "--no-branch-prefix", "npm", "start"]).unwrap();
+        if let CliCommand::Run { no_branch_prefix, .. } = cli.command {
+            assert!(no_branch_prefix, "no_branch_prefix should be true when flag is passed");
+        } else {
+            panic!("expected Run command");
+        }
+    }
+
+    #[test]
+    fn run_command_has_script_arg() {
+        let cli = Cli::try_parse_from(["portal", "run", "--script", "start", "npm", "run", "dev"])
+            .expect("parse failed");
+        match cli.command {
+            CliCommand::Run { script, .. } => {
+                assert_eq!(script, Some("start".to_string()));
+            }
+            _ => panic!("expected Run variant"),
+        }
+    }
+
+    #[test]
+    fn run_command_script_absent_by_default() {
+        let cli = Cli::try_parse_from(["portal", "run", "npm", "run", "dev"])
+            .expect("parse failed");
+        match cli.command {
+            CliCommand::Run { script, .. } => {
+                assert_eq!(script, None);
+            }
+            _ => panic!("expected Run variant"),
+        }
     }
 
     #[test]

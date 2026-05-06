@@ -28,9 +28,16 @@ impl TcpRouteManager {
         self.remove(&route.hostname).await;
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", public_port)).await?;
-        let backend_port = route.port;
-        let hostname = route.hostname.clone();
+        self.start_forwarding(route.hostname.clone(), listener, route.port);
+        Ok(())
+    }
 
+    fn start_forwarding(
+        &self,
+        hostname: String,
+        listener: tokio::net::TcpListener,
+        backend_port: u16,
+    ) {
         let task = tokio::spawn(async move {
             loop {
                 let Ok((mut inbound, _)) = listener.accept().await else {
@@ -50,8 +57,6 @@ impl TcpRouteManager {
         if let Some(old) = self.handles.insert(hostname, TcpListenerHandle { task }) {
             old.task.abort();
         }
-
-        Ok(())
     }
 
     pub async fn remove(&self, hostname: &str) {
@@ -92,29 +97,13 @@ mod tests {
             stream.write_all(&buf[..n]).await.unwrap();
         });
 
-        let public_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let public_port = public_listener.local_addr().unwrap().port();
-        drop(public_listener);
-
-        let manager = TcpRouteManager::default();
-        manager
-            .ensure_route(&Route {
-                hostname: "redis.localhost".to_string(),
-                port: backend_port,
-                public_port: Some(public_port),
-                protocol: RouteProtocol::Tcp,
-                pid: std::process::id(),
-                owner_pid: std::process::id(),
-                cwd: "/tmp".to_string(),
-                created_at: Utc::now(),
-                slot: 0,
-                label: None,
-                tailscale_url: None,
-                tailscale_https_port: None,
-                tailscale_funnel: false,
-            })
+        let public_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
+        let public_port = public_listener.local_addr().unwrap().port();
+
+        let manager = TcpRouteManager::default();
+        manager.start_forwarding("redis.localhost".to_string(), public_listener, backend_port);
 
         let mut client = tokio::net::TcpStream::connect(("127.0.0.1", public_port))
             .await
