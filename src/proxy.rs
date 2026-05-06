@@ -41,7 +41,7 @@ pub fn is_http_method_prefix(buf: &[u8]) -> bool {
     }
     matches!(
         &buf[..3],
-        b"GET" | b"PUT" | b"POS" | b"HEA" | b"DEL" | b"PAT" | b"OPT" | b"CON"
+        b"GET" | b"PUT" | b"POS" | b"HEA" | b"DEL" | b"PAT" | b"OPT" | b"CON" | b"PRI"
     )
 }
 
@@ -751,6 +751,13 @@ mod tests {
     fn http_method_prefix_rejects_empty() {
         assert!(!is_http_method_prefix(b""));
         assert!(!is_http_method_prefix(b"GE"));
+    }
+
+    #[test]
+    fn h2_preface_detected_as_http() {
+        // PRI is the first 3 bytes of the HTTP/2 connection preface
+        assert!(is_http_method_prefix(b"PRI"), "H2 preface should be routed to HTTP path");
+        assert!(!is_http_method_prefix(b"\x16\x03\x01"), "TLS should not match");
     }
 
     #[test]
