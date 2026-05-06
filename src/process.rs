@@ -2,6 +2,7 @@ use crate::error::Result;
 use std::path::Path;
 
 pub const PORTLESS_URL_ENV: &str = "PORTLESS_URL";
+pub const PORTLESS_TAILSCALE_URL_ENV: &str = "PORTLESS_TAILSCALE_URL";
 
 /// Spawn a child dev server process.
 /// Callers provide `extra_env` — all env vars to set (PORT, PORTAL_URL, NODE_EXTRA_CA_CERTS, etc.).
