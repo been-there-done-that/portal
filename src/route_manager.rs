@@ -34,6 +34,11 @@ impl RouteManager {
         self.store.list()
     }
 
+    /// Replace a specific slot in-place (no auto-slot-assignment). Used for patch operations.
+    pub async fn update_slot(&self, route: Route) -> Result<()> {
+        self.store.update_slot(route).await
+    }
+
     pub async fn insert(&self, route: Route) -> Result<()> {
         if route.protocol == RouteProtocol::Tcp {
             self.tcp.ensure_route(&route).await?;

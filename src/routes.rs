@@ -130,6 +130,29 @@ impl StateStore {
         Ok(())
     }
 
+    /// Replace a specific slot in-place without auto-slot-assignment.
+    /// Returns an error if the hostname or slot does not exist.
+    pub async fn update_slot(&self, route: Route) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let mut entry = match self.map.get_mut(&route.hostname) {
+            Some(e) => e,
+            None => return Err(crate::error::Error::HostNotFound(route.hostname.clone())),
+        };
+        let slots = entry.value_mut();
+        match slots.iter_mut().find(|r| r.slot == route.slot) {
+            Some(existing) => {
+                *existing = route;
+                drop(entry);
+                self.persist_locked()?;
+                self.sync_hosts_locked();
+                Ok(())
+            }
+            None => Err(crate::error::Error::Ipc(
+                format!("slot {} not found for \"{}\"", route.slot, route.hostname)
+            )),
+        }
+    }
+
     pub async fn remove(&self, hostname: &str) -> Result<()> {
         let _guard = self.write_lock.lock().await;
         self.map.remove(hostname);

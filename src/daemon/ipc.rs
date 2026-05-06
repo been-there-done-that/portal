@@ -313,8 +313,8 @@ async fn dispatch(
             protocol,
             pid,
             cwd,
-            slot: _,
-            label: _,
+            slot,
+            label,
         } => {
             // Validate hostname: must be non-empty, no newlines, reasonable length
             if hostname.is_empty() || hostname.len() > 253 || hostname.contains('\n') || hostname.contains('\r') {
@@ -329,8 +329,8 @@ async fn dispatch(
                 owner_pid: pid,
                 cwd,
                 created_at: chrono::Utc::now(),
-                slot: 0,
-                label: None,
+                slot: slot.unwrap_or(0),
+                label,
                 tailscale_url: None,
                 tailscale_https_port: None,
                 tailscale_funnel: false,
@@ -434,20 +434,99 @@ async fn dispatch(
 
         Command::UpdateRoute {
             hostname,
-            tailscale_url: _,
-            tailscale_https_port: _,
-            tailscale_funnel: _,
+            tailscale_url,
+            tailscale_https_port,
+            tailscale_funnel,
         } => {
-            // Validate hostname
-            if hostname.is_empty() || hostname.len() > 253 || hostname.contains('\n') || hostname.contains('\r') {
-                return Response::err("invalid hostname");
+            // Find the primary route (slot 0) for this hostname and patch its Tailscale fields
+            let updated = {
+                let slots = manager.list_slots(&hostname);
+                if let Some(mut route) = slots.into_iter().find(|r| r.slot == 0) {
+                    if let Some(url) = tailscale_url {
+                        route.tailscale_url = Some(url);
+                    }
+                    if let Some(port) = tailscale_https_port {
+                        route.tailscale_https_port = Some(port);
+                    }
+                    if let Some(funnel) = tailscale_funnel {
+                        route.tailscale_funnel = funnel;
+                    }
+                    Some(route)
+                } else {
+                    None
+                }
+            };
+            match updated {
+                None => Response::err(format!("no route for \"{hostname}\"")),
+                Some(route) => match manager.update_slot(route).await {
+                    Ok(_) => Response::ok_empty(),
+                    Err(e) => Response::err(e.to_string()),
+                },
             }
-            // For now, acknowledge the update request but don't persist the tailscale fields
-            // This handler can be extended in the future to update route metadata
-            Response::ok_empty()
         }
 
         Command::Run { .. } => Response::err("use portal run from CLI"),
+    }
+}
+
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::TempDir;
+    use crate::routes::StateStore;
+    use crate::tcp::TcpRouteManager;
+    use crate::route_manager::RouteManager;
+
+    #[tokio::test]
+    async fn update_route_patches_tailscale_fields() {
+        let temp = TempDir::new().unwrap();
+        let routes = StateStore::new(temp.path().join("routes.json")).unwrap();
+        let tcp_routes = TcpRouteManager::default();
+        let manager = RouteManager::new(routes, tcp_routes);
+
+        // Insert a base route
+        manager.insert(crate::routes::Route {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: RouteProtocol::Http,
+            pid: std::process::id(),
+            owner_pid: std::process::id(),
+            cwd: "/tmp".to_string(),
+            created_at: Utc::now(),
+            slot: 0,
+            label: None,
+            tailscale_url: None,
+            tailscale_https_port: None,
+            tailscale_funnel: false,
+        }).await.unwrap();
+
+        // Send UpdateRoute command
+        let response = dispatch(
+            Command::UpdateRoute {
+                hostname: "myapp.localhost".to_string(),
+                tailscale_url: Some("https://mynode.ts.net:443".to_string()),
+                tailscale_https_port: Some(443),
+                tailscale_funnel: Some(false),
+            },
+            manager.clone(),
+            std::time::Instant::now(),
+            DaemonMode::Full,
+            std::path::PathBuf::from("/tmp/portal.sock"),
+            std::path::PathBuf::from("/tmp/daemon.pid"),
+            true,
+            80,
+            443,
+        ).await;
+
+        assert!(response.ok, "UpdateRoute should succeed");
+
+        // Verify the route was updated
+        let route = manager.get("myapp.localhost").unwrap();
+        assert_eq!(route.tailscale_url, Some("https://mynode.ts.net:443".to_string()));
+        assert_eq!(route.tailscale_https_port, Some(443));
+        assert!(!route.tailscale_funnel);
     }
 }
 
