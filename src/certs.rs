@@ -586,4 +586,121 @@ mod tests {
         let result = untrust_system_ca();
         assert!(result.is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // AKI / EKU extension tests (require x509-parser)
+    // -----------------------------------------------------------------------
+
+    /// Parse the leaf cert DER from a CertifiedKey (index 0 in the chain).
+    fn leaf_der(ck: &rustls::sign::CertifiedKey) -> Vec<u8> {
+        ck.cert[0].as_ref().to_vec()
+    }
+
+    /// Parse the first CA cert DER from a PEM byte slice.
+    fn ca_der_from_pem(ca_pem: &[u8]) -> Vec<u8> {
+        use std::io::BufReader as StdBufReader;
+        let mut reader = StdBufReader::new(ca_pem);
+        let der: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut reader)
+                .collect::<std::io::Result<Vec<_>>>()
+                .expect("reading CA DER");
+        der.into_iter()
+            .next()
+            .expect("CA PEM should contain at least one cert")
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn host_cert_has_authority_key_identifier() {
+        use x509_parser::prelude::*;
+
+        let (_tmp, store) = make_store();
+        store.ensure_ca().expect("ensure_ca");
+        let ck = store.cert_for_host("aki.localhost").expect("cert_for_host");
+
+        let der = leaf_der(&ck);
+        let (_, cert) = X509Certificate::from_der(&der).expect("parse leaf DER");
+
+        let has_aki = cert.extensions().iter().any(|ext| {
+            matches!(
+                ext.parsed_extension(),
+                ParsedExtension::AuthorityKeyIdentifier(_)
+            )
+        });
+        assert!(has_aki, "leaf cert must contain an AKI extension");
+    }
+
+    #[test]
+    fn host_cert_aki_matches_ca_subject_key_identifier() {
+        use x509_parser::prelude::*;
+
+        let (_tmp, store) = make_store();
+        store.ensure_ca().expect("ensure_ca");
+        let ck = store
+            .cert_for_host("aki-ski.localhost")
+            .expect("cert_for_host");
+        let ca_pem = store.ca_pem().expect("ca_pem");
+
+        let leaf_der_bytes = leaf_der(&ck);
+        let (_, leaf) = X509Certificate::from_der(&leaf_der_bytes).expect("parse leaf DER");
+
+        let ca_der_bytes = ca_der_from_pem(&ca_pem);
+        let (_, ca_cert) = X509Certificate::from_der(&ca_der_bytes).expect("parse CA DER");
+
+        // Extract AKI key identifier from leaf cert
+        let aki_id: Vec<u8> = leaf
+            .extensions()
+            .iter()
+            .find_map(|ext| {
+                if let ParsedExtension::AuthorityKeyIdentifier(aki) = ext.parsed_extension() {
+                    aki.key_identifier.as_ref().map(|ki| ki.0.to_vec())
+                } else {
+                    None
+                }
+            })
+            .expect("leaf cert must have AKI with key identifier");
+
+        // Extract SKI from CA cert
+        let ski_id: Vec<u8> = ca_cert
+            .extensions()
+            .iter()
+            .find_map(|ext| {
+                if let ParsedExtension::SubjectKeyIdentifier(ski) = ext.parsed_extension() {
+                    Some(ski.0.to_vec())
+                } else {
+                    None
+                }
+            })
+            .expect("CA cert must have SKI extension");
+
+        assert_eq!(
+            aki_id, ski_id,
+            "leaf cert AKI key identifier must match CA SKI"
+        );
+    }
+
+    #[test]
+    fn host_cert_has_server_auth_eku() {
+        use x509_parser::prelude::*;
+
+        let (_tmp, store) = make_store();
+        store.ensure_ca().expect("ensure_ca");
+        let ck = store.cert_for_host("eku.localhost").expect("cert_for_host");
+
+        let der = leaf_der(&ck);
+        let (_, cert) = X509Certificate::from_der(&der).expect("parse leaf DER");
+
+        let has_server_auth = cert.extensions().iter().any(|ext| {
+            if let ParsedExtension::ExtendedKeyUsage(eku) = ext.parsed_extension() {
+                eku.server_auth
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_server_auth,
+            "leaf cert must contain EKU serverAuth (id-kp-serverAuth)"
+        );
+    }
 }

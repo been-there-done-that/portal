@@ -312,6 +312,23 @@ pub fn extract_host(h: Option<&http::HeaderValue>) -> String {
         .to_string()
 }
 
+/// Return the effective request hostname for routing purposes.
+///
+/// HTTP/1.1 carries the target host in the `Host` header.
+/// HTTP/2 carries it in the `:authority` pseudo-header, which hyper surfaces
+/// via `req.uri().authority()`.  We check the `Host` header first (HTTP/1.1
+/// path) and fall back to `:authority` (HTTP/2 path).
+pub(crate) fn effective_request_host<B>(req: &Request<B>) -> String {
+    let from_host = extract_host(req.headers().get(http::header::HOST));
+    if !from_host.is_empty() {
+        return from_host;
+    }
+    req.uri()
+        .authority()
+        .map(|a| a.host().to_string())
+        .unwrap_or_default()
+}
+
 /// Main proxy handler for HTTPS requests.
 pub async fn handle_https_request(
     req: Request<Incoming>,
@@ -334,17 +351,7 @@ pub async fn handle_https_request(
     let hostname = {
         // HTTP/2 puts the host in :authority (→ req.uri().authority()), not the Host header.
         // HTTP/1.1 uses the Host header. Check both so routes work for either version.
-        let from_host = extract_host(req.headers().get(http::header::HOST));
-        let from_authority = req
-            .uri()
-            .authority()
-            .map(|a| a.host().to_string())
-            .unwrap_or_default();
-        let effective_host = if !from_host.is_empty() {
-            from_host
-        } else {
-            from_authority
-        };
+        let effective_host = effective_request_host(&req);
         if !routes.list_slots(&effective_host).is_empty() {
             effective_host
         } else {
@@ -1172,5 +1179,65 @@ mod tests {
 
         let resp = handle_websocket(req, port).await.unwrap();
         assert_eq!(resp.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    // -----------------------------------------------------------------------
+    // effective_request_host tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn effective_host_uses_host_header_when_present() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://ignored.localhost/path")
+            .header(http::header::HOST, "myapp.localhost")
+            .body(())
+            .unwrap();
+        assert_eq!(effective_request_host(&req), "myapp.localhost");
+    }
+
+    #[test]
+    fn effective_host_falls_back_to_authority_when_no_host_header() {
+        // HTTP/2: no Host header, authority is in the URI
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://h2app.localhost/path")
+            .body(())
+            .unwrap();
+        assert_eq!(effective_request_host(&req), "h2app.localhost");
+    }
+
+    #[test]
+    fn effective_host_returns_empty_when_neither_host_nor_authority() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/relative-path")
+            .body(())
+            .unwrap();
+        assert_eq!(effective_request_host(&req), "");
+    }
+
+    #[test]
+    fn effective_host_strips_port_from_host_header() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/path")
+            .header(http::header::HOST, "myapp.localhost:8443")
+            .body(())
+            .unwrap();
+        assert_eq!(effective_request_host(&req), "myapp.localhost");
+    }
+
+    #[test]
+    fn effective_host_strips_port_from_authority() {
+        // HTTP/2: no Host header; port embedded in :authority
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://myapp.localhost:8443/path")
+            .body(())
+            .unwrap();
+        // No Host header → falls back to URI authority; hyper's Authority::host()
+        // already strips the port.
+        assert_eq!(effective_request_host(&req), "myapp.localhost");
     }
 }
