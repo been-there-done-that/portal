@@ -35,6 +35,20 @@ pub enum Command {
         protocol: crate::routes::RouteProtocol,
         pid: u32,
         cwd: String,
+        #[serde(default)]
+        slot: Option<u32>,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// Update Tailscale fields on an existing route (sent after tailscale::register)
+    UpdateRoute {
+        hostname: String,
+        #[serde(default)]
+        tailscale_url: Option<String>,
+        #[serde(default)]
+        tailscale_https_port: Option<u16>,
+        #[serde(default)]
+        tailscale_funnel: Option<bool>,
     },
     /// Force-sync /etc/hosts with the current route table
     HostsSync,
@@ -251,6 +265,8 @@ mod tests {
             protocol: crate::routes::RouteProtocol::Tcp,
             pid: 123,
             cwd: "/tmp".to_string(),
+            slot: None,
+            label: None,
         };
 
         let json = serde_json::to_string(&cmd).expect("serialize");
@@ -282,6 +298,69 @@ mod tests {
         let back: Command = serde_json::from_str(&json).expect("deserialize");
         match back {
             Command::GetUrl { hostname } => assert_eq!(hostname, "myapp.localhost"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_register_route_with_slot_and_label() {
+        let cmd = Command::RegisterRoute {
+            hostname: "myapp.localhost".to_string(),
+            port: 4000,
+            public_port: None,
+            protocol: crate::routes::RouteProtocol::Http,
+            pid: 123,
+            cwd: "/tmp".to_string(),
+            slot: Some(1),
+            label: Some("dev".to_string()),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let back: Command = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            Command::RegisterRoute { slot, label, .. } => {
+                assert_eq!(slot, Some(1));
+                assert_eq!(label, Some("dev".to_string()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_route_slot_defaults_to_none() {
+        // Old clients that don't send slot/label should deserialize with None
+        let json = r#"{"cmd":"register_route","hostname":"old.localhost","port":4000,"public_port":null,"protocol":"http","pid":1,"cwd":"/tmp"}"#;
+        let cmd: Command = serde_json::from_str(json).expect("deserialize old RegisterRoute");
+        match cmd {
+            Command::RegisterRoute { slot, label, .. } => {
+                assert_eq!(slot, None);
+                assert_eq!(label, None);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_update_route() {
+        let cmd = Command::UpdateRoute {
+            hostname: "myapp.localhost".to_string(),
+            tailscale_url: Some("https://mynode.ts.net:8443".to_string()),
+            tailscale_https_port: Some(8443),
+            tailscale_funnel: Some(false),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let back: Command = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            Command::UpdateRoute {
+                hostname,
+                tailscale_url,
+                tailscale_https_port,
+                tailscale_funnel,
+            } => {
+                assert_eq!(hostname, "myapp.localhost");
+                assert_eq!(tailscale_url, Some("https://mynode.ts.net:8443".to_string()));
+                assert_eq!(tailscale_https_port, Some(8443));
+                assert_eq!(tailscale_funnel, Some(false));
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

@@ -313,6 +313,8 @@ async fn dispatch(
             protocol,
             pid,
             cwd,
+            slot: _,
+            label: _,
         } => {
             // Validate hostname: must be non-empty, no newlines, reasonable length
             if hostname.is_empty() || hostname.len() > 253 || hostname.contains('\n') || hostname.contains('\r') {
@@ -428,6 +430,21 @@ async fn dispatch(
                 .map(serde_json::Value::String)
                 .collect();
             Response::ok(serde_json::Value::Array(values))
+        }
+
+        Command::UpdateRoute {
+            hostname,
+            tailscale_url: _,
+            tailscale_https_port: _,
+            tailscale_funnel: _,
+        } => {
+            // Validate hostname
+            if hostname.is_empty() || hostname.len() > 253 || hostname.contains('\n') || hostname.contains('\r') {
+                return Response::err("invalid hostname");
+            }
+            // For now, acknowledge the update request but don't persist the tailscale fields
+            // This handler can be extended in the future to update route metadata
+            Response::ok_empty()
         }
 
         Command::Run { .. } => Response::err("use portal run from CLI"),

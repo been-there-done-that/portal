@@ -427,6 +427,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     protocol: crate::routes::RouteProtocol::Http,
                     pid: 0,
                     cwd: String::new(),
+                    slot: None,
+                    label: None,
                 },
             ).await?;
             let resp: crate::proto::Response = read_frame(&mut stream).await?;
@@ -723,6 +725,8 @@ async fn run_monorepo(
                             protocol: crate::routes::RouteProtocol::Http,
                             pid: child_pid,
                             cwd: cwd.to_string_lossy().to_string(),
+                            slot: None,
+                            label: None,
                         },
                     )
                     .await;
@@ -992,6 +996,8 @@ async fn do_run(
                 },
                 pid: child_pid,
                 cwd: cwd.to_string_lossy().to_string(),
+                slot: None,
+                label: None,
             },
         )
         .await;
