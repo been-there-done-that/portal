@@ -607,6 +607,7 @@ pub async fn handle_https_request(
                     resp_bytes
                 };
 
+
                 if let Some(sender) = &inspector {
                     use crate::inspector::types::{CapturedBody, CapturedRequest};
                     sender.send(CapturedRequest {
