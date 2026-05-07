@@ -637,14 +637,25 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         CliCommand::Inspect => {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let config = crate::config::Config::load(&cwd).unwrap_or_default();
-            let port = config.proxy.https_port;
-            let url = if port == 443 {
+            let sock = crate::config::dirs_for_state().join("portal.sock");
+            // Ask the running daemon for its actual https_port — CLI flags and portal.toml
+            // may differ, so config file is not reliable here.
+            let https_port: u16 = async {
+                let mut stream = ipc_connect().await.ok()?;
+                write_frame(&mut stream, &Command::Status).await.ok()?;
+                let resp = read_frame::<_, crate::proto::Response>(&mut stream).await.ok()?;
+                resp.data?.get("https_port")?.as_u64().and_then(|p| u16::try_from(p).ok())
+            }.await.unwrap_or(443);
+
+            let url = if https_port == 443 {
                 "https://_.logs".to_string()
             } else {
-                format!("https://_.logs:{port}")
+                format!("https://_.logs:{https_port}")
             };
+
+            // Ensure _.logs is in /etc/hosts before opening the browser.
+            cli_sync_hosts(&sock).await;
+
             #[cfg(target_os = "macos")]
             {
                 std::process::Command::new("open").arg(&url).spawn().ok();
